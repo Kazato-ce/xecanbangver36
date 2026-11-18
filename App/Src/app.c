@@ -100,31 +100,11 @@ void app_init(void)
     tof_init(&hi2c2);
     radio_init(&s_hspi2);
 
-    telemetry_uart_send_string("\r\n=======================================================\r\n");
-    telemetry_uart_send_string("  STM32F405 TWO-WHEEL BALANCING ROBOT (xecanbangver36)\r\n");
-    telemetry_uart_send_string("  Ho tro: USB CDC (PA11/PA12) + UART1 (PA9 TX, PA10 RX)\r\n");
-    telemetry_uart_send_string("=======================================================\r\n");
-    telemetry_uart_send_string("[INIT] USB Virtual COM Port & UART1 da san sang!\r\n");
-    telemetry_uart_send_string("[INIT] Dang kiem tra MPU6050 tren I2C1 (PB6/PB7)...\r\n");
-
     /* 5. Khởi tạo MPU6050 & hiệu chuẩn bias khi xe đứng yên */
     if (imu_init(&hi2c1)) {
-        telemetry_uart_send_string("[INIT] Tim thay MPU6050! Dang hieu chuan bias Gyro...\r\n");
-        if (imu_calibrate(300)) {
-            telemetry_uart_send_string("[INIT] Hieu chuan Gyro thanh cong! He thong SAN SANG.\r\n");
-        } else {
-            telemetry_uart_send_string("[WARN] Hieu chuan IMU chua hoan hao, hay giu xe yen khi khoi dong.\r\n");
-        }
-    } else {
-        telemetry_uart_send_string("[ERROR] KHONG TIM THAY MPU6050! Kiem tra day I2C1 PB6/PB7, 3.3V, GND, AD0 noi GND.\r\n");
+        /* Lấy 300 mẫu hiệu chuẩn (~600 ms) */
+        imu_calibrate(300);
     }
-
-    telemetry_uart_send_string("[LENH TEST QUA USB]:\r\n");
-    telemetry_uart_send_string("  'TEST_MPU'     -> Kiem tra cam bien MPU6050\r\n");
-    telemetry_uart_send_string("  'TEST_STEPPER' -> Test 2 dong co TMC2208 (quay 5s)\r\n");
-    telemetry_uart_send_string("  'TEST_NRF'     -> Kiem tra module song NRF24L01\r\n");
-    telemetry_uart_send_string("  'STATUS'       -> Xem bao cao toan dien\r\n");
-    telemetry_uart_send_string("  'HELP'         -> Xem tat ca cac lenh dieu khien\r\n\r\n");
 
     /* 6. Khởi động Timer điều khiển và phát xung */
     app_timers_init();
@@ -152,25 +132,44 @@ void app_timer_control_tick(void)
     uint32_t imu_err = imu_get_error_count();
 
     /* Nhận lệnh từ Radio NRF24 */
-    float cmd_drive = 0.0f;
-    float cmd_steer = 0.0f;
-    bool arm_req = false;
-    bool disarm_req = false;
-    bool estop_req = false;
+    float nrf_drive = 0.0f;
+    float nrf_steer = 0.0f;
+    bool nrf_arm_req = false;
+    bool nrf_disarm_req = false;
+    bool nrf_estop_req = false;
 
-    radio_get_commands(&cmd_drive, &cmd_steer, &arm_req, &disarm_req, &estop_req);
+    radio_get_commands(&nrf_drive, &nrf_steer, &nrf_arm_req, &nrf_disarm_req, &nrf_estop_req);
     bool radio_ok = radio_is_connected();
 
-    /* Kiểm tra thêm lệnh ARM / DISARM từ ESP32 Super Mini qua UART */
-    if (telemetry_uart_get_arm_request()) {
-        arm_req = true;
-    }
-    if (telemetry_uart_get_disarm_request()) {
-        disarm_req = true;
+    /* Nhận lệnh từ ESP32 Super Mini qua UART */
+    float uart_drive = 0.0f;
+    float uart_steer = 0.0f;
+    bool uart_has_drive = telemetry_uart_get_drive_cmd(&uart_drive, &uart_steer);
+    bool uart_arm_req = telemetry_uart_get_arm_request();
+    bool uart_disarm_req = telemetry_uart_get_disarm_request();
+
+    /* Tổng hợp lệnh ARM / DISARM / ESTOP từ cả hai nguồn (NRF và ESP32 Super Mini) */
+    bool arm_req = nrf_arm_req || uart_arm_req;
+    bool disarm_req = nrf_disarm_req || uart_disarm_req;
+    bool estop_req = nrf_estop_req;
+
+    /* Tổng hợp lệnh di chuyển DRIVE & STEER:
+     * - Nếu ESP32 Super Mini (UART) vừa gửi lệnh lái (trong 600ms) -> dùng lệnh UART
+     * - Ngược lại nếu NRF24 đang có sóng kết nối -> dùng lệnh NRF24
+     * - Nếu cả hai không điều khiển -> tốc độ = 0 */
+    float cmd_drive = 0.0f;
+    float cmd_steer = 0.0f;
+
+    if (uart_has_drive) {
+        cmd_drive = uart_drive;
+        cmd_steer = uart_steer;
+    } else if (radio_ok) {
+        cmd_drive = nrf_drive;
+        cmd_steer = nrf_steer;
     }
 
     /* Coi liên kết điều khiển hợp lệ nếu có sóng NRF hoặc đang dùng UART */
-    bool control_link_ok = radio_ok || true;
+    bool control_link_ok = radio_ok || uart_has_drive || true;
 
     /* Cập nhật Máy trạng thái */
     sm_update(pitch, control_link_ok, arm_req, disarm_req, estop_req, imu_err);
@@ -195,15 +194,6 @@ void app_timer_control_tick(void)
 
         stepper_set_speed(MOTOR_LEFT, left_spd);
         stepper_set_speed(MOTOR_RIGHT, right_spd);
-        stepper_update_ramp(CONTROL_DT_S);
-    } else if (sm_get_state() == STATE_TEST_MOTOR) {
-        float test_l_rpm = 0.0f, test_r_rpm = 0.0f;
-        sm_get_motor_test_speeds(&test_l_rpm, &test_r_rpm);
-        float left_hz = test_l_rpm * (float)MOTOR_STEPS_PER_REV / 60.0f;
-        float right_hz = test_r_rpm * (float)MOTOR_STEPS_PER_REV / 60.0f;
-
-        stepper_set_speed(MOTOR_LEFT, left_hz);
-        stepper_set_speed(MOTOR_RIGHT, right_hz);
         stepper_update_ramp(CONTROL_DT_S);
     } else {
         stepper_stop();

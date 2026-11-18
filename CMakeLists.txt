@@ -103,8 +103,11 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     -u _printf_float
 )
 
+get_filename_component(ARM_TOOLCHAIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+find_program(OBJCOPY_EXE NAMES arm-none-eabi-objcopy.exe arm-none-eabi-objcopy HINTS "${ARM_TOOLCHAIN_DIR}" "C:/Users/Thanh/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin")
+
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.hex
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.bin
+    COMMAND ${OBJCOPY_EXE} -O ihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.hex
+    COMMAND ${OBJCOPY_EXE} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.bin
     COMMENT "Building ${CMAKE_PROJECT_NAME}.hex and ${CMAKE_PROJECT_NAME}.bin"
 )

@@ -13,7 +13,7 @@ void balance_get_motor_speeds(float *left_steps_s, float *right_steps_s);
 void balance_set_pid(float kp_angle, float kd_angle, float ki_angle, float kp_speed, float ki_speed, float kp_steer);
 void balance_get_pid(float *kp_angle, float *kd_angle, float *ki_angle, float *kp_speed, float *ki_speed, float *kp_steer);
 void balance_set_target_offset(float offset_deg);
-float balance_get_target_pitch_deg(void);
 float balance_get_target_offset(void);
+float balance_get_target_pitch_deg(void);
 
 #endif /* BALANCE_H */

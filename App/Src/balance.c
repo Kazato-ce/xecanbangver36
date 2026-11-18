@@ -1,22 +1,34 @@
 #include "balance.h"
 #include "config.h"
+#include "stepper_tmc2208.h"
 #include <math.h>
 
-/* Dynamic PID gains with default values from config.h */
-static float s_kp_angle = PID_ANGLE_KP;
-static float s_kd_angle = PID_ANGLE_KD;
-static float s_ki_angle = PID_ANGLE_KI;
+/* ====================================================================
+ * Hệ Thống Cân Bằng Mô Phỏng Theo Thuật Toán Chuẩn BalancingWii (Mahowik)
+ * Kiến trúc: Vòng ngoài PI Vận Tốc + Vòng trong PD Góc Tích Phân Gia Tốc
+ * ==================================================================== */
 
-static float s_kp_speed = PID_SPEED_KP;
-static float s_ki_speed = PID_SPEED_KI;
+/* Các hệ số điều khiển (có thể tinh chỉnh trực tiếp qua Web / UART) */
+static float s_kp_angle = PID_ANGLE_KP;   /* Mặc định ~ 18.0 */
+static float s_kd_angle = PID_ANGLE_KD;   /* Mặc định ~ 0.85 */
+static float s_ki_angle = PID_ANGLE_KI;   /* Mặc định ~ 0.00 */
 
-static float s_kp_steer = PID_STEER_KP;
+static float s_kp_speed = PID_SPEED_KP;   /* Mặc định ~ 0.35 */
+static float s_ki_speed = PID_SPEED_KI;   /* Mặc định ~ 0.02 */
+static float s_kp_pos   = 0.002f;         /* Hệ số giữ vị trí đứng yên (Position Hold) */
 
-static float s_target_offset_deg = BALANCE_TARGET_OFFSET_DEG;
-static float s_target_pitch_deg = BALANCE_TARGET_OFFSET_DEG;
-static float s_gyro_filtered = 0.0f;
-static float s_integral_speed = 0.0f;
+static float s_kp_steer = PID_STEER_KP;   /* Hệ số bẻ lái (Steering) */
+
+static float s_target_offset_deg = 0.0f;  /* Góc trim cân bằng tự nhiên */
+static float s_target_pitch_deg  = 0.0f;  /* Góc nghiêng mục tiêu tức thời */
+
+/* Biến trạng thái nội bộ thuật toán BalancingWii */
+static float s_actual_averaged_speed = 0.0f; /* Tốc độ trung bình qua lọc thông thấp */
+static float s_speed_error_i = 0.0f;         /* Tích phân sai số tốc độ */
+static float s_position_error = 0.0f;        /* Tích phân quãng đường khi giữ vị trí */
+static float s_speed = 0.0f;                 /* Vận tốc tích lũy từ gia tốc góc */
 static float s_integral_angle = 0.0f;
+
 static float s_out_left_steps = 0.0f;
 static float s_out_right_steps = 0.0f;
 
@@ -33,17 +45,20 @@ void balance_init(void)
 
     s_kp_speed = PID_SPEED_KP;
     s_ki_speed = PID_SPEED_KI;
+    s_kp_pos   = 0.002f;
     s_kp_steer = PID_STEER_KP;
 
-    s_target_offset_deg = BALANCE_TARGET_OFFSET_DEG;
+    s_target_offset_deg = 0.0f;
     balance_reset();
 }
 
 void balance_reset(void)
 {
     s_target_pitch_deg = s_target_offset_deg;
-    s_gyro_filtered = 0.0f;
-    s_integral_speed = 0.0f;
+    s_actual_averaged_speed = 0.0f;
+    s_speed_error_i = 0.0f;
+    s_position_error = 0.0f;
+    s_speed = 0.0f;
     s_integral_angle = 0.0f;
     s_out_left_steps = 0.0f;
     s_out_right_steps = 0.0f;
@@ -76,13 +91,8 @@ void balance_get_pid(float *kp_angle, float *kd_angle, float *ki_angle, float *k
 void balance_set_target_offset(float offset_deg)
 {
     if (isfinite(offset_deg)) {
-        s_target_offset_deg = clampf(offset_deg, -15.0f, 15.0f);
+        s_target_offset_deg = clampf(offset_deg, -8.0f, 8.0f);
     }
-}
-
-float balance_get_target_pitch_deg(void)
-{
-    return s_target_pitch_deg;
 }
 
 float balance_get_target_offset(void)
@@ -90,48 +100,91 @@ float balance_get_target_offset(void)
     return s_target_offset_deg;
 }
 
+float balance_get_target_pitch_deg(void)
+{
+    return s_target_pitch_deg;
+}
+
 void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float cmd_steer, float dt_s)
 {
     if (dt_s <= 0.0f || dt_s > 0.05f) dt_s = CONTROL_DT_S;
 
-    /* 1. Vòng điều khiển vận tốc (Outer loop):
-     * Tính góc nghiêng mục tiêu dựa trên sai lệch giữa vận tốc mong muốn và vận tốc bánh xe hiện tại */
-    float speed_err = cmd_drive - 0.5f * (s_out_left_steps + s_out_right_steps) / (float)MOTOR_STEPS_PER_REV;
-    s_integral_speed += speed_err * dt_s;
-    s_integral_speed = clampf(s_integral_speed, -5.0f, 5.0f);
+    /* 1. Lấy tốc độ bánh xe thực tế hiện tại (steps/sec) */
+    float actual_speed = 0.5f * (stepper_get_speed(MOTOR_LEFT) + stepper_get_speed(MOTOR_RIGHT));
 
-    float speed_tilt = (s_kp_speed * speed_err) + (s_ki_speed * s_integral_speed);
-    speed_tilt = clampf(speed_tilt, -6.0f, 6.0f);
-    s_target_pitch_deg = s_target_offset_deg + speed_tilt;
+    /* 2. Bộ lọc thông thấp tốc độ (BalancingWii: 0.92 * avg + 0.08 * cur) */
+    s_actual_averaged_speed = s_actual_averaged_speed * 0.92f + actual_speed * 0.08f;
 
-    /* 2. Vòng điều khiển cân bằng góc nghiêng (Inner loop):
-     * Lọc thông thấp bậc 1 (LPF) cho tốc độ góc Gyro để triệt tiêu nhiễu cao tần gây rè/kêu động cơ */
-    s_gyro_filtered = (0.75f * s_gyro_filtered) + (0.25f * gyro_rate_dps);
+    /* Quy đổi lệnh lái cmd_drive (-1.0 .. +1.0) sang tốc độ mục tiêu */
+    float target_speed = cmd_drive * (float)STEP_CRUISE_MAX_HZ;
 
-    float angle_err = pitch_deg - s_target_pitch_deg;
-
-    /* Deadband vi rung (micro-jitter): triệt tiêu rung lắc tần số cao khi đứng yên */
-    if (fabsf(angle_err) < 0.06f) {
-        angle_err = 0.0f;
+    /* 3. Chế độ Giữ vị trí (BalancingWii Position Hold Mode):
+     * Khi xe đứng yên không có lệnh di chuyển (target_speed = 0, steer = 0),
+     * tự động tích lũy quãng đường trôi để tạo góc phản kháng đưa xe về chỗ cũ */
+    if (fabsf(target_speed) < 50.0f && fabsf(cmd_steer) < 0.05f) {
+        s_position_error += actual_speed * dt_s;
+        s_position_error = clampf(s_position_error, -4000.0f, 4000.0f);
+    } else {
+        s_position_error = 0.0f;
     }
 
+    /* 4. Vòng ngoài PI Vận Tốc: Tính góc nghiêng mục tiêu (Target Pitch) */
+    float speed_err = target_speed - s_actual_averaged_speed - (s_position_error * s_kp_pos);
+
+    s_speed_error_i += speed_err * dt_s;
+    s_speed_error_i = clampf(s_speed_error_i, -8000.0f, 8000.0f);
+
+    float target_pitch = s_target_offset_deg
+                       + (s_kp_speed * 0.001f * speed_err)
+                       + (s_ki_speed * 0.001f * s_speed_error_i);
+    target_pitch = clampf(target_pitch, -MAX_TARGET_ANGLE_DEG, MAX_TARGET_ANGLE_DEG);
+    s_target_pitch_deg = target_pitch;
+
+    /* 5. Vòng trong PD Góc Nghiêng với tích phân gia tốc (BalancingWii Core):
+     * Với động cơ bước, mô-men chống ngã sinh ra từ GIA TỐC bánh xe,
+     * sau đó tích phân gia tốc thành vận tốc phát xung (speed += accel * dt) */
+    float angle_err = pitch_deg - s_target_pitch_deg;
+
     s_integral_angle += angle_err * dt_s;
-    s_integral_angle = clampf(s_integral_angle, -10.0f, 10.0f);
+    s_integral_angle = clampf(s_integral_angle, -5.0f, 5.0f);
 
-    float balance_output = (s_kp_angle * angle_err) +
-                           (s_kd_angle * s_gyro_filtered) +
-                           (s_ki_angle * s_integral_angle);
+    /* Tính gia tốc bánh xe cần thiết (steps/s^2) */
+    float acceleration = (s_kp_angle * 125.0f * angle_err)
+                       + (s_kd_angle * 85.0f * gyro_rate_dps)
+                       + (s_ki_angle * 20.0f * s_integral_angle);
 
-    /* Quy đổi đầu ra sang tần số xung bước (steps/sec) */
-    float base_steps_s = balance_output * (float)MOTOR_STEPS_PER_REV / 360.0f * 15.0f;
+    /* Tích phân gia tốc thành vận tốc bước */
+    s_speed += acceleration * dt_s;
+    s_speed = clampf(s_speed, -STEP_FREQ_MAX_HZ, STEP_FREQ_MAX_HZ);
 
-    /* 3. Phối hợp điều khiển quay xe (Steering) */
-    float steer_steps_s = cmd_steer * s_kp_steer * (float)MOTOR_STEPS_PER_REV / 1000.0f;
+    /* 6. Hệ số suy giảm động ở góc lớn (BalancingWii Dynamic K - dynK):
+     * Khi góc nghiêng quá lớn (gần ngưỡng ngã), giảm bớt tốc độ tối đa
+     * để duy trì mô-men xoắn bước cực đại chống trượt bước */
+    float abs_angle = fabsf(pitch_deg);
+    float dyn_k = 1.0f;
+    if (abs_angle < 25.0f) {
+        dyn_k = 1.0f;
+    } else if (abs_angle < FALL_ANGLE_THRESHOLD_DEG) {
+        dyn_k = (FALL_ANGLE_THRESHOLD_DEG - abs_angle) / (FALL_ANGLE_THRESHOLD_DEG - 25.0f) * 0.85f + 0.15f;
+    } else {
+        dyn_k = 0.0f;
+    }
 
-    s_out_left_steps  = base_steps_s - steer_steps_s;
-    s_out_right_steps = base_steps_s + steer_steps_s;
+    float output_speed = s_speed * dyn_k;
 
-    /* Giới hạn an toàn */
+    /* 7. Bộ trộn rẽ (Steering Mixer) & Chống bão hòa (Anti-saturation):
+     * Cắt giảm tốc độ tuyến tính nếu tổng tốc độ và rẽ vượt quá giới hạn xung tối đa */
+    float steering = cmd_steer * s_kp_steer * (float)STEP_CRUISE_MAX_HZ;
+    float max_spd = STEP_FREQ_MAX_HZ;
+
+    if ((fabsf(output_speed) + fabsf(steering)) > max_spd) {
+        output_speed = (output_speed > 0.0f) ? (max_spd - fabsf(steering)) : (-max_spd + fabsf(steering));
+    }
+
+    s_out_left_steps  = output_speed - steering;
+    s_out_right_steps = output_speed + steering;
+
+    /* Giới hạn an toàn cuối cùng */
     s_out_left_steps  = clampf(s_out_left_steps,  -STEP_FREQ_MAX_HZ, STEP_FREQ_MAX_HZ);
     s_out_right_steps = clampf(s_out_right_steps, -STEP_FREQ_MAX_HZ, STEP_FREQ_MAX_HZ);
 }

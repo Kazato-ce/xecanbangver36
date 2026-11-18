@@ -17,4 +17,7 @@ void telemetry_uart_send_string(const char *str);
 bool telemetry_uart_get_arm_request(void);
 bool telemetry_uart_get_disarm_request(void);
 
+/* Check and retrieve drive/steer command from ESP32 Super Mini or USB */
+bool telemetry_uart_get_drive_cmd(float *drive, float *steer);
+
 #endif /* TELEMETRY_UART_H */
