@@ -6,6 +6,7 @@
 
 #define PROTOCOL_MAGIC_BYTE         0xAA
 #define PROTOCOL_VERSION            0x01
+#define PROTOCOL_TELEMETRY_MAGIC    0xBB
 
 typedef enum {
     CMD_DISARM  = 0x00,
@@ -27,6 +28,21 @@ typedef struct {
     uint8_t  reserved[5];
     uint16_t checksum;      /* Simple 16-bit sum or CRC */
 } RadioPacket_t;
+
+typedef struct {
+    uint8_t  magic;         /* 0xBB */
+    uint8_t  version;       /* 0x01 */
+    uint16_t seq;
+    uint8_t  state;         /* VehicleState_t: 0:BOOT, 1:CALIB, 2:DISARMED, 3:ARMED, 4:FAULT */
+    uint8_t  fault;         /* FaultReason_t */
+    int16_t  pitch_cd;      /* Pitch in centi-degrees (e.g. 150 = 1.50 deg) */
+    int16_t  rate_cd;       /* Gyro rate in centi-deg/s */
+    int16_t  rpm_left;      /* RPM * 10 */
+    int16_t  rpm_right;     /* RPM * 10 */
+    uint16_t dist_front_cm; /* Obstacle distance (cm) */
+    uint16_t bat_mv;        /* Battery voltage (mV) */
+    uint16_t checksum;
+} TelemetryPacket_t;
 #pragma pack(pop)
 
 /* Checksum calculation helper */

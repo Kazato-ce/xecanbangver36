@@ -160,6 +160,17 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     nrf_send_cmd(NRF_CMD_FLUSH_RX);
     nrf_send_cmd(NRF_CMD_FLUSH_TX);
 
+    /* Kích hoạt tính năng ACK Payload và Dynamic Payload (lệnh 0x50 0x73) */
+    uint8_t act_cmd[2] = { 0x50, 0x73 };
+    csn_low();
+    HAL_SPI_Transmit(s_hspi, act_cmd, 2, 5);
+    csn_high();
+
+    /* Bật EN_DPL (bit 2) và EN_ACK_PAY (bit 1) trong thanh ghi FEATURE (0x1D) */
+    nrf_write_reg(0x1D, 0x06);
+    /* Bật Dynamic Payload trên Pipe 0 trong thanh ghi DYNPD (0x1C) */
+    nrf_write_reg(0x1C, 0x01);
+
     /* Clear interrupts */
     nrf_write_reg(NRF_REG_STATUS, 0x70);
 
@@ -223,22 +234,16 @@ bool radio_is_connected(void)
     return s_connected;
 }
 
-bool radio_check_hardware(uint8_t *out_status, uint8_t *out_config, uint8_t *out_rf_ch)
+bool radio_check_hardware(uint8_t *status, uint8_t *config, uint8_t *channel)
 {
     if (!s_hspi) return false;
     uint8_t st = nrf_read_reg(NRF_REG_STATUS);
     uint8_t cfg = nrf_read_reg(NRF_REG_CONFIG);
     uint8_t ch = nrf_read_reg(NRF_REG_RF_CH);
-
-    if (out_status) *out_status = st;
-    if (out_config) *out_config = cfg;
-    if (out_rf_ch)  *out_rf_ch = ch;
-
-    /* Neu ca STATUS va CONFIG doc ra 0x00 hoac 0xFF la SPI khong tiep xuc duoc */
-    if ((st == 0x00 || st == 0xFF) && (cfg == 0x00 || cfg == 0xFF)) {
-        return false;
-    }
-    return true;
+    if (status) *status = st;
+    if (config) *config = cfg;
+    if (channel) *channel = ch;
+    return (st != 0x00 && st != 0xFF);
 }
 
 void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, bool *disarm_req, bool *estop_req)
@@ -248,4 +253,36 @@ void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, boo
     if (arm_req)    { *arm_req = s_cmd_arm; s_cmd_arm = false; }
     if (disarm_req) { *disarm_req = s_cmd_disarm; s_cmd_disarm = false; }
     if (estop_req)  { *estop_req = s_cmd_estop; }
+}
+
+void radio_load_ack_telemetry(uint8_t state, uint8_t fault, float pitch_deg, float rate_dps, float left_rpm, float right_rpm, uint16_t dist_cm, float bat_v)
+{
+    if (!s_hspi) return;
+
+    static uint16_t s_telem_seq = 0;
+    TelemetryPacket_t telem;
+    telem.magic         = PROTOCOL_TELEMETRY_MAGIC;
+    telem.version       = PROTOCOL_VERSION;
+    telem.seq           = s_telem_seq++;
+    telem.state         = state;
+    telem.fault         = fault;
+    telem.pitch_cd      = (int16_t)(pitch_deg * 100.0f);
+    telem.rate_cd       = (int16_t)(rate_dps * 100.0f);
+    telem.rpm_left      = (int16_t)(left_rpm * 10.0f);
+    telem.rpm_right     = (int16_t)(right_rpm * 10.0f);
+    telem.dist_front_cm = dist_cm;
+    telem.bat_mv        = (uint16_t)(bat_v * 1000.0f);
+    telem.checksum      = protocol_calc_checksum((const uint8_t*)&telem, sizeof(TelemetryPacket_t) - 2);
+
+    /* Xóa TX FIFO để không bị ứ đọng gói cũ */
+    nrf_send_cmd(NRF_CMD_FLUSH_TX);
+
+    /* Ghi gói tin vào ACK Payload của Pipe 0: mã lệnh 0xA8 | pipe (0xA8) */
+    uint8_t tx[sizeof(TelemetryPacket_t) + 1];
+    tx[0] = 0xA8;
+    memcpy(&tx[1], &telem, sizeof(TelemetryPacket_t));
+
+    csn_low();
+    HAL_SPI_Transmit(s_hspi, tx, sizeof(tx), 10);
+    csn_high();
 }

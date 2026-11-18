@@ -127,6 +127,8 @@ void setup() {
     radio.setPALevel(RF24_PA_HIGH);
     radio.setRetries(5, 5); // delay 1500us, 5 retries
     radio.setPayloadSize(sizeof(RadioPacket_t));
+    radio.enableDynamicPayloads();
+    radio.enableAckPayload();
 
     // Mở pipe ghi sang STM32
     radio.openWritingPipe(RADIO_ADDR);
@@ -187,6 +189,8 @@ void processCommandLine(String line) {
     s_current_drive = 0;
     s_current_steer = 0;
     Serial.println("ACK: STOP");
+  } else if (line.equalsIgnoreCase("PING")) {
+    Serial.printf("PONG: RADIO_OK=%d\n", s_radio_ok ? 1 : 0);
   } else if (line == "?") {
     printMenu();
   }
@@ -239,6 +243,17 @@ void loop() {
     if (tx_ok) {
       s_ok_cnt++;
       digitalWrite(PIN_LED, HIGH); // Sáng LED khi có ACK từ xe
+
+      // Nhận Telemetry gửi kèm trực tiếp trong gói ACK
+      if (radio.isAckPayloadAvailable()) {
+        TelemetryPacket_t rxTelem;
+        radio.read(&rxTelem, sizeof(TelemetryPacket_t));
+        if (rxTelem.magic == PROTOCOL_TELEMETRY_MAGIC) {
+          Serial.printf("[STM32 Telemetry] State=%d, Pitch=%.2f deg, Dist=%u cm, Bat=%.2f V\n",
+                        rxTelem.state, (float)rxTelem.pitch_cd / 100.0f,
+                        rxTelem.dist_front_cm, (float)rxTelem.bat_mv / 1000.0f);
+        }
+      }
     } else {
       s_fail_cnt++;
       digitalWrite(PIN_LED, LOW);
@@ -248,8 +263,8 @@ void loop() {
     if ((now - s_last_log_ms) >= 1000) {
       s_last_log_ms = now;
       if (tx_ok) {
-        Serial.printf("[KẾT NỐI TỐT] Đang nhận tín hiệu từ STM32! (Gói #%u | Nhận: %u, Rớt: %u)\n",
-                      s_seq, s_ok_cnt, s_fail_cnt);
+        float pdr = (s_ok_cnt + s_fail_cnt > 0) ? (s_ok_cnt * 100.0f / (s_ok_cnt + s_fail_cnt)) : 100.0f;
+        Serial.printf("[KẾT NỐI TỐT] Sóng NRF OK | Gói #%u | Tỉ lệ ACK: %.1f%%\n", s_seq, pdr);
       } else {
         Serial.printf("[CHỜ TÍN HIỆU XE] Đang gửi lệnh... Chưa nhận được ACK từ STM32 (Thử: %u lần)\n",
                       s_seq);
@@ -259,17 +274,6 @@ void loop() {
     // Nếu vừa gửi lệnh ARM/ESTOP một lần thì đưa về chế độ duy trì DRIVE
     if (s_pending_cmd == CMD_ARM) {
       s_pending_cmd = CMD_DRIVE;
-    }
-
-    // Kiểm tra nếu STM32 có gửi gói tin trả lời (AckPayload hoặc phản hồi)
-    if (radio.isAckPayloadAvailable()) {
-      TelemetryPacket_t rxTelem;
-      radio.read(&rxTelem, sizeof(TelemetryPacket_t));
-      if (rxTelem.magic == PROTOCOL_TELEMETRY_MAGIC) {
-        Serial.printf("[STM32 Telemetry] State=%d, Pitch=%.2f deg, Dist=%u cm, Bat=%.2f V\n",
-                      rxTelem.state, (float)rxTelem.pitch_cd / 100.0f,
-                      rxTelem.dist_front_cm, (float)rxTelem.bat_mv / 1000.0f);
-      }
     }
   }
 

@@ -119,6 +119,18 @@ void app_loop(void)
     ultrasonic_update(now_ms);
     tof_update(now_ms);
     telemetry_uart_update(now_ms);
+
+    /* Cập nhật Telemetry nạp sẵn vào ACK Payload của NRF24 mỗi 50 ms */
+    static uint32_t s_last_nrf_telem_ms = 0;
+    if ((now_ms - s_last_nrf_telem_ms) >= 50) {
+        s_last_nrf_telem_ms = now_ms;
+        float pitch = imu_get_pitch_deg();
+        float rate  = imu_get_gyro_rate_dps();
+        float left_rpm  = stepper_get_speed(MOTOR_LEFT)  * 60.0f / (float)MOTOR_STEPS_PER_REV;
+        float right_rpm = stepper_get_speed(MOTOR_RIGHT) * 60.0f / (float)MOTOR_STEPS_PER_REV;
+        uint16_t dist = ultrasonic_get_dist_cm(US_FRONT);
+        radio_load_ack_telemetry(sm_get_state(), sm_get_fault_reason(), pitch, rate, left_rpm, right_rpm, dist, 14.8f);
+    }
 }
 
 /* Ngắt chu kỳ cố định 200 Hz từ TIM6 */

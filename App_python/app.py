@@ -368,6 +368,12 @@ class GroundStationApp:
 
         tk.Label(row, text="Baud: 115200", fg=THEME["subtext"], bg=THEME["card"]).pack(side=tk.LEFT, padx=8)
 
+        btn_ping = tk.Button(
+            row, text="⚡ Ping Sóng", bg=THEME["card_alt"], fg=THEME["text"],
+            relief=tk.FLAT, padx=8, command=self.ping_robot
+        )
+        btn_ping.pack(side=tk.LEFT, padx=4)
+
         self.btn_connect = tk.Button(
             row,
             text="KẾT NỐI",
@@ -381,14 +387,33 @@ class GroundStationApp:
         )
         self.btn_connect.pack(side=tk.RIGHT)
 
+        status_row = tk.Frame(card, bg=THEME["card"])
+        status_row.pack(fill=tk.X, pady=(4, 0))
+
         self.lbl_serial_badge = tk.Label(
-            card,
+            status_row,
             text="● Chưa kết nối Serial",
             font=("Segoe UI", 9),
             fg=THEME["subtext"],
             bg=THEME["card"]
         )
-        self.lbl_serial_badge.pack(anchor="w", pady=(4, 0))
+        self.lbl_serial_badge.pack(side=tk.LEFT)
+
+        self.lbl_rf_link = tk.Label(
+            status_row,
+            text="● Sóng NRF: Chờ kết nối COM...",
+            font=("Segoe UI", 9, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
+        )
+        self.lbl_rf_link.pack(side=tk.RIGHT)
+
+    def ping_robot(self):
+        if not self.serial_running or not self.serial_client:
+            self.log_console("[Ping] Chưa kết nối cổng COM của ESP32!", "WARN")
+            return
+        self.send_command("PING")
+        self.log_console("[Ping] Đã gửi lệnh PING kiểm tra sóng sang ESP32 DevKit...", "INFO")
 
     def refresh_com_ports(self):
         ports = list_com_ports()
@@ -461,12 +486,16 @@ class GroundStationApp:
         self.log_console(f"RX: {line}", "RX")
 
         # Cập nhật trạng thái kết nối từ thông báo của ESP32 DevKit
-        if "KẾT NỐI TỐT" in line or "LIÊN LẠC OK" in line:
-            if self.robot_state_str in ("DISCONNECTED", "WAITING"):
+        if "KẾT NỐI TỐT" in line or "Sóng NRF OK" in line:
+            if hasattr(self, 'lbl_rf_link'):
+                self.lbl_rf_link.config(text="● SÓNG NRF: ĐÃ BẮT SÓNG XE (ACK OK)", fg=THEME["success"])
+            if self.robot_state_str in ("DISCONNECTED", "WAITING...", "NO_RADIO"):
                 self.robot_state_str = "CONNECTED"
                 self._update_telemetry_widgets()
-        elif "CHỜ TÍN HIỆU XE" in line or "CHƯA NHẬN" in line:
-            if self.robot_state_str == "DISCONNECTED":
+        elif "CHỜ TÍN HIỆU XE" in line or "Chưa nhận được ACK" in line:
+            if hasattr(self, 'lbl_rf_link'):
+                self.lbl_rf_link.config(text="● SÓNG NRF: CHƯA THẤY XE (KIỂM TRA NGUỒN STM32)", fg=THEME["danger"])
+            if self.robot_state_str == "CONNECTED":
                 self.robot_state_str = "WAITING..."
                 self._update_telemetry_widgets()
         elif "ACK: ARM" in line:
@@ -478,6 +507,13 @@ class GroundStationApp:
         elif "ACK: ESTOP" in line:
             self.robot_state_str = "FAULT"
             self._update_telemetry_widgets()
+        elif "PONG:" in line:
+            if "RADIO_OK=1" in line:
+                if hasattr(self, 'lbl_rf_link'):
+                    self.lbl_rf_link.config(text="● NRF24 ESP32: SẴN SÀNG", fg=THEME["primary"])
+            else:
+                if hasattr(self, 'lbl_rf_link'):
+                    self.lbl_rf_link.config(text="● NRF24: LỖI PHẦN CỨNG", fg=THEME["danger"])
 
         # Phân tích dòng Telemetry từ STM32 gửi qua NRF24:
         # Ví dụ: "[STM32 Telemetry] State=3, Pitch=1.25 deg, Dist=45 cm, Bat=15.80 V"
@@ -572,6 +608,17 @@ class GroundStationApp:
         self.canvas_tilt = tk.Canvas(tilt_frame, height=14, bg="#11111b", highlightthickness=0)
         self.canvas_tilt.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
 
+        # Banner chỉ dẫn tư thế sẵn sàng ARM
+        self.lbl_upright_guide = tk.Label(
+            card,
+            text="👉 HÃY DỰNG XE THẲNG ĐỨNG (GÓC ±3.5°) RỒI BẤM 'ARM XE (X)' ĐỂ BẬT CÂN BẰNG",
+            font=("Segoe UI", 9, "bold"),
+            fg=THEME["warning"],
+            bg=THEME["card"],
+            pady=4
+        )
+        self.lbl_upright_guide.pack(fill=tk.X)
+
     def _update_telemetry_widgets(self):
         # Màu theo trạng thái
         st_colors = {
@@ -599,6 +646,24 @@ class GroundStationApp:
         # Cập nhật Pin
         bat_str = f"{self.bat_v:.2f} V" if self.bat_v > 0 else "-- V"
         self.lbl_telem_bat.config(text=bat_str)
+
+        # Cập nhật banner chỉ dẫn tư thế sẵn sàng ARM
+        if hasattr(self, 'lbl_upright_guide'):
+            if self.robot_state_str == "ARMED":
+                self.lbl_upright_guide.config(
+                    text="⚡ XE ĐANG CÂN BẰNG TỰ ĐỘNG (ARMED) - DÙNG W/A/S/D ĐỂ LÁI XE",
+                    fg=THEME["success"]
+                )
+            elif abs(self.pitch_deg) <= 3.5:
+                self.lbl_upright_guide.config(
+                    text="✔ XE ĐANG DỰNG THẲNG ĐÚNG CHUẨN (±3.5°) - BẤM 'ARM XE (X)' ĐỂ BẮT ĐẦU CÂN BẰNG!",
+                    fg=THEME["success"]
+                )
+            else:
+                self.lbl_upright_guide.config(
+                    text=f"⚠ XE ĐANG NGHIÊNG ({self.pitch_deg:+.1f}°) - CẦN DỰNG THẲNG TRONG VÙNG ±3.5° ĐỂ ARM",
+                    fg=THEME["warning"]
+                )
 
         # Vẽ thanh Tilt visualizer
         self._draw_tilt_bar()
