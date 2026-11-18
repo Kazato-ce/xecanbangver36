@@ -1,0 +1,251 @@
+#include "radio_nrf24.h"
+#include "board_config.h"
+#include "config.h"
+#include "protocol.h"
+#include <string.h>
+
+/* NRF24L01 Commands & Registers */
+#define NRF_CMD_R_REGISTER          0x00
+#define NRF_CMD_W_REGISTER          0x20
+#define NRF_CMD_R_RX_PAYLOAD        0x61
+#define NRF_CMD_W_TX_PAYLOAD        0xA0
+#define NRF_CMD_FLUSH_TX            0xE1
+#define NRF_CMD_FLUSH_RX            0xE2
+#define NRF_CMD_NOP                 0xFF
+
+#define NRF_REG_CONFIG              0x00
+#define NRF_REG_EN_AA               0x01
+#define NRF_REG_EN_RXADDR           0x02
+#define NRF_REG_SETUP_AW            0x03
+#define NRF_REG_SETUP_RETR          0x04
+#define NRF_REG_RF_CH               0x05
+#define NRF_REG_RF_SETUP            0x06
+#define NRF_REG_STATUS              0x07
+#define NRF_REG_RX_ADDR_P0          0x0A
+#define NRF_REG_TX_ADDR             0x10
+#define NRF_REG_RX_PW_P0            0x11
+#define NRF_REG_FIFO_STATUS         0x17
+
+static SPI_HandleTypeDef *s_hspi = NULL;
+static uint32_t s_last_packet_ms = 0;
+static bool s_connected = false;
+
+static float s_cmd_drive = 0.0f;
+static float s_cmd_steer = 0.0f;
+static bool  s_cmd_arm = false;
+static bool  s_cmd_disarm = false;
+static bool  s_cmd_estop = false;
+
+static inline void nrf_delay_us(uint32_t us)
+{
+    uint32_t ticks = us * (168000000U / 1000000U);
+    uint32_t start = DWT->CYCCNT;
+    while ((DWT->CYCCNT - start) < ticks);
+}
+
+static inline void csn_low(void)
+{
+    HAL_GPIO_WritePin(BOARD_NRF_CSN_PORT, BOARD_NRF_CSN_PIN, GPIO_PIN_RESET);
+    nrf_delay_us(2);
+}
+
+static inline void csn_high(void)
+{
+    nrf_delay_us(2);
+    HAL_GPIO_WritePin(BOARD_NRF_CSN_PORT, BOARD_NRF_CSN_PIN, GPIO_PIN_SET);
+    nrf_delay_us(2);
+}
+
+static inline void ce_low(void)   { HAL_GPIO_WritePin(BOARD_NRF_CE_PORT,  BOARD_NRF_CE_PIN,  GPIO_PIN_RESET); }
+static inline void ce_high(void)  { HAL_GPIO_WritePin(BOARD_NRF_CE_PORT,  BOARD_NRF_CE_PIN,  GPIO_PIN_SET); }
+
+static uint8_t nrf_read_reg(uint8_t reg)
+{
+    uint8_t tx[2] = { NRF_CMD_R_REGISTER | (reg & 0x1F), 0xFF };
+    uint8_t rx[2] = { 0, 0 };
+    csn_low();
+    HAL_SPI_TransmitReceive(s_hspi, tx, rx, 2, 5);
+    csn_high();
+    return rx[1];
+}
+
+static void nrf_write_reg(uint8_t reg, uint8_t val)
+{
+    uint8_t tx[2] = { NRF_CMD_W_REGISTER | (reg & 0x1F), val };
+    csn_low();
+    HAL_SPI_Transmit(s_hspi, tx, 2, 5);
+    csn_high();
+}
+
+static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len)
+{
+    uint8_t tx[36] = {0};
+    if (len > 32) len = 32;
+    tx[0] = NRF_CMD_W_REGISTER | (reg & 0x1F);
+    memcpy(&tx[1], buf, len);
+    csn_low();
+    HAL_SPI_Transmit(s_hspi, tx, len + 1, 10);
+    csn_high();
+}
+
+static void nrf_read_buf(uint8_t cmd, uint8_t *buf, uint8_t len)
+{
+    uint8_t tx[36] = {0};
+    uint8_t rx[36] = {0};
+    if (len > 32) len = 32;
+    tx[0] = cmd;
+    csn_low();
+    HAL_SPI_TransmitReceive(s_hspi, tx, rx, len + 1, 10);
+    csn_high();
+    memcpy(buf, &rx[1], len);
+}
+
+static void nrf_send_cmd(uint8_t cmd)
+{
+    csn_low();
+    HAL_SPI_Transmit(s_hspi, &cmd, 1, 5);
+    csn_high();
+}
+
+bool radio_init(SPI_HandleTypeDef *hspi)
+{
+    s_hspi = hspi;
+    s_connected = false;
+    s_last_packet_ms = 0;
+
+    ce_low();
+    csn_high();
+    HAL_Delay(100); /* Chờ nguồn NRF24 PA+LNA ổn định */
+
+    /* Đọc STATUS ban đầu */
+    uint8_t status = nrf_read_reg(NRF_REG_STATUS);
+
+    /* Test SPI read: SETUP_AW register (default is 0x03 for 5-byte address) */
+    nrf_write_reg(NRF_REG_SETUP_AW, 0x03);
+    uint8_t aw = nrf_read_reg(NRF_REG_SETUP_AW);
+
+    /* Nếu mất nguồn hoặc đứt dây hoàn toàn (0x00 hoặc 0xFF) */
+    if (status == 0x00 || status == 0xFF) {
+        if (aw != 0x03) {
+            return false; /* Không nhận diện được NRF24 qua SPI */
+        }
+    }
+
+    /* Auto-Ack on Pipe 0 */
+    nrf_write_reg(NRF_REG_EN_AA, 0x01);
+
+    /* Enable RX Pipe 0 */
+    nrf_write_reg(NRF_REG_EN_RXADDR, 0x01);
+
+    /* Address width = 5 bytes */
+    nrf_write_reg(NRF_REG_SETUP_AW, 0x03);
+
+    /* Auto retransmit: 750us, 5 retries */
+    nrf_write_reg(NRF_REG_SETUP_RETR, 0x25);
+
+    /* RF Channel */
+    nrf_write_reg(NRF_REG_RF_CH, RADIO_CHANNEL);
+
+    /* 1 Mbps, 0 dBm (RF_PWR=11, RF_DR_HIGH=0, RF_DR_LOW=0) */
+    nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
+
+    /* RX Payload width for Pipe 0 */
+    nrf_write_reg(NRF_REG_RX_PW_P0, sizeof(RadioPacket_t));
+
+    /* RX Address Pipe 0 */
+    const uint8_t rx_addr[5] = { 0xE7, 0xE7, 0xE7, 0xE7, 0xE7 };
+    nrf_write_buf(NRF_REG_RX_ADDR_P0, rx_addr, 5);
+
+    /* Flush FIFOs */
+    nrf_send_cmd(NRF_CMD_FLUSH_RX);
+    nrf_send_cmd(NRF_CMD_FLUSH_TX);
+
+    /* Clear interrupts */
+    nrf_write_reg(NRF_REG_STATUS, 0x70);
+
+    /* Power up, PRX mode, 2-byte CRC (EN_CRC=1, CRCO=1, PWR_UP=1, PRIM_RX=1) */
+    nrf_write_reg(NRF_REG_CONFIG, 0x0F);
+
+    ce_high(); /* Bắt đầu lắng nghe RX */
+    HAL_Delay(2);
+
+    return true;
+}
+
+void radio_update(uint32_t current_time_ms)
+{
+    if (!s_hspi) return;
+
+    /* Kiểm tra gói tin mới qua thanh ghi STATUS */
+    uint8_t status = nrf_read_reg(NRF_REG_STATUS);
+
+    if (status & 0x40) { /* RX_DR bit */
+        RadioPacket_t packet;
+        nrf_read_buf(NRF_CMD_R_RX_PAYLOAD, (uint8_t*)&packet, sizeof(RadioPacket_t));
+
+        /* Xóa cờ RX_DR */
+        nrf_write_reg(NRF_REG_STATUS, 0x40);
+
+        /* Kiểm tra tính toàn vẹn của gói tin */
+        if (packet.magic == PROTOCOL_MAGIC_BYTE && packet.version == PROTOCOL_VERSION) {
+            uint16_t expected_cs = protocol_calc_checksum((const uint8_t*)&packet, sizeof(RadioPacket_t) - 2);
+            if (expected_cs == packet.checksum) {
+                s_last_packet_ms = current_time_ms;
+                s_connected = true;
+
+                s_cmd_drive = (float)packet.drive_cmd / 1000.0f; /* Normalization -1.0 .. +1.0 */
+                s_cmd_steer = (float)packet.steer_cmd / 1000.0f;
+
+                if (packet.cmd == CMD_ARM) {
+                    s_cmd_arm = true;
+                    s_cmd_disarm = false;
+                    s_cmd_estop = false;
+                } else if (packet.cmd == CMD_DISARM) {
+                    s_cmd_disarm = true;
+                    s_cmd_arm = false;
+                } else if (packet.cmd == CMD_ESTOP || (packet.flags & 0x01)) {
+                    s_cmd_estop = true;
+                }
+            }
+        }
+    }
+
+    /* Kiểm tra timeout mất sóng */
+    if (s_connected && ((current_time_ms - s_last_packet_ms) > RADIO_TIMEOUT_MS)) {
+        s_connected = false;
+        s_cmd_drive = 0.0f;
+        s_cmd_steer = 0.0f;
+    }
+}
+
+bool radio_is_connected(void)
+{
+    return s_connected;
+}
+
+bool radio_check_hardware(uint8_t *out_status, uint8_t *out_config, uint8_t *out_rf_ch)
+{
+    if (!s_hspi) return false;
+    uint8_t st = nrf_read_reg(NRF_REG_STATUS);
+    uint8_t cfg = nrf_read_reg(NRF_REG_CONFIG);
+    uint8_t ch = nrf_read_reg(NRF_REG_RF_CH);
+
+    if (out_status) *out_status = st;
+    if (out_config) *out_config = cfg;
+    if (out_rf_ch)  *out_rf_ch = ch;
+
+    /* Neu ca STATUS va CONFIG doc ra 0x00 hoac 0xFF la SPI khong tiep xuc duoc */
+    if ((st == 0x00 || st == 0xFF) && (cfg == 0x00 || cfg == 0xFF)) {
+        return false;
+    }
+    return true;
+}
+
+void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, bool *disarm_req, bool *estop_req)
+{
+    if (drive_norm) *drive_norm = s_cmd_drive;
+    if (steer_norm) *steer_norm = s_cmd_steer;
+    if (arm_req)    { *arm_req = s_cmd_arm; s_cmd_arm = false; }
+    if (disarm_req) { *disarm_req = s_cmd_disarm; s_cmd_disarm = false; }
+    if (estop_req)  { *estop_req = s_cmd_estop; }
+}

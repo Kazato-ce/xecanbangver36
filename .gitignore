@@ -1,0 +1,28 @@
+# Build directories and binaries
+build/
+bin/
+obj/
+*.elf
+*.hex
+*.bin
+*.map
+*.su
+*.d
+*.o
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+snapshots/
+
+# IDE & Editor files
+.vscode/
+.settings/
+.clangd/
+mx.scratch
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
