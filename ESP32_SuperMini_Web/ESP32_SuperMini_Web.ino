@@ -36,6 +36,11 @@ struct TelemetryData {
   uint16_t dist_r = 999;
   uint16_t tof_mm = 8190;
   float    bat = 14.8f;
+  bool     mpu_ok = false;
+  uint32_t imu_err = 0;
+  bool     nrf_ok = false;
+  bool     supermini_ok = false;
+  bool     upright = false;
   uint32_t last_rx_ms = 0;
 } telem;
 
@@ -60,6 +65,11 @@ void parseTelemetryFrame(const String& line) {
     int p_ki     = line.indexOf("\"ki\":");
     int p_distf  = line.indexOf("\"dist_f\":");
     int p_tof    = line.indexOf("\"tof_mm\":");
+    int p_mpu    = line.indexOf("\"mpu_ok\":");
+    int p_imue   = line.indexOf("\"imu_err\":");
+    int p_nrf    = line.indexOf("\"nrf_ok\":");
+    int p_spm    = line.indexOf("\"supermini_ok\":");
+    int p_upr    = line.indexOf("\"upright\":");
 
     if (p_pitch >= 0)  telem.pitch  = line.substring(p_pitch + 8).toFloat();
     if (p_target >= 0) telem.target = line.substring(p_target + 9).toFloat();
@@ -72,6 +82,11 @@ void parseTelemetryFrame(const String& line) {
     if (p_ki >= 0)     telem.ki     = line.substring(p_ki + 5).toFloat();
     if (p_distf >= 0)  telem.dist_f = line.substring(p_distf + 9).toInt();
     if (p_tof >= 0)    telem.tof_mm = line.substring(p_tof + 9).toInt();
+    if (p_mpu >= 0)    telem.mpu_ok = (line.substring(p_mpu + 9, p_mpu + 14).indexOf("true") >= 0);
+    if (p_imue >= 0)   telem.imu_err = (uint32_t)line.substring(p_imue + 10).toInt();
+    if (p_nrf >= 0)    telem.nrf_ok = (line.substring(p_nrf + 9, p_nrf + 14).indexOf("true") >= 0);
+    if (p_spm >= 0)    telem.supermini_ok = (line.substring(p_spm + 15, p_spm + 20).indexOf("true") >= 0);
+    if (p_upr >= 0)    telem.upright = (line.substring(p_upr + 10, p_upr + 15).indexOf("true") >= 0);
 
     telem.last_rx_ms = millis();
     return;
@@ -144,16 +159,23 @@ void handleRoot() {
 }
 
 void handleGetData() {
-  char json[320];
+  bool stm_link = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 2000));
+  char json[420];
   snprintf(json, sizeof(json),
     "{\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
     "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"state\":%d,\"fault\":%d,"
     "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,"
-    "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":%.1f}",
+    "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":%.1f,"
+    "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_ok\":%s,\"upright\":%s}",
     telem.pitch, telem.target, telem.rate,
     telem.rpm_l, telem.rpm_r, telem.state, telem.fault,
     telem.kp, telem.kd, telem.ki,
-    telem.dist_f, telem.dist_l, telem.dist_r, telem.tof_mm, telem.bat
+    telem.dist_f, telem.dist_l, telem.dist_r, telem.tof_mm, telem.bat,
+    stm_link ? "true" : "false",
+    telem.mpu_ok ? "true" : "false",
+    telem.imu_err,
+    telem.nrf_ok ? "true" : "false",
+    telem.upright ? "true" : "false"
   );
 
   server.sendHeader("Access-Control-Allow-Origin", "*");

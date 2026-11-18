@@ -81,6 +81,32 @@ if sys.platform == 'win32':
             ('cbOutQue', wintypes.DWORD),
         ]
 
+    # Explicitly configure Win32 function signatures to prevent 64-bit handle truncation
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+    ]
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.GetCommState.restype = wintypes.BOOL
+    k32.GetCommState.argtypes = [wintypes.HANDLE, ctypes.POINTER(DCB)]
+    k32.SetCommState.restype = wintypes.BOOL
+    k32.SetCommState.argtypes = [wintypes.HANDLE, ctypes.POINTER(DCB)]
+    k32.SetCommTimeouts.restype = wintypes.BOOL
+    k32.SetCommTimeouts.argtypes = [wintypes.HANDLE, ctypes.POINTER(COMMTIMEOUTS)]
+    k32.ClearCommError.restype = wintypes.BOOL
+    k32.ClearCommError.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(COMSTAT)]
+    k32.ReadFile.restype = wintypes.BOOL
+    k32.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_char_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    k32.WriteFile.restype = wintypes.BOOL
+    k32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_char_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    k32.EscapeCommFunction.restype = wintypes.BOOL
+    k32.EscapeCommFunction.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.PurgeComm.restype = wintypes.BOOL
+    k32.PurgeComm.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
 
 def list_com_ports():
     """Returns a list of available serial port names (e.g. ['COM3', 'COM4'])."""

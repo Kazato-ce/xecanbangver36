@@ -9,6 +9,8 @@
 #include "tof_vl53l0x.h"
 #include "ultrasonic_hcsr05.h"
 #include "telemetry_uart.h"
+#include "protocol.h"
+#include <math.h>
 
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
@@ -129,7 +131,27 @@ void app_loop(void)
         float left_rpm  = stepper_get_speed(MOTOR_LEFT)  * 60.0f / (float)MOTOR_STEPS_PER_REV;
         float right_rpm = stepper_get_speed(MOTOR_RIGHT) * 60.0f / (float)MOTOR_STEPS_PER_REV;
         uint16_t dist = ultrasonic_get_dist_cm(US_FRONT);
-        radio_load_ack_telemetry(sm_get_state(), sm_get_fault_reason(), pitch, rate, left_rpm, right_rpm, dist, 14.8f);
+
+        uint8_t diag_flags = 0;
+        if (imu_is_calibrated() && (imu_get_error_count() == 0)) {
+            diag_flags |= DIAG_FLAG_MPU_OK;
+        }
+        if (radio_check_hardware(NULL, NULL, NULL)) {
+            diag_flags |= DIAG_FLAG_NRF_OK;
+        }
+        if (telemetry_uart_is_supermini_linked()) {
+            diag_flags |= DIAG_FLAG_SUPERMINI_OK;
+        }
+        if (fabsf(pitch) <= 3.5f) {
+            diag_flags |= DIAG_FLAG_UPRIGHT_READY;
+        }
+        if (stepper_is_enabled()) {
+            diag_flags |= DIAG_FLAG_STEPPERS_ENABLED;
+        }
+        uint8_t imu_err = (uint8_t)(imu_get_error_count() > 255 ? 255 : imu_get_error_count());
+
+        radio_load_ack_telemetry(sm_get_state(), sm_get_fault_reason(), pitch, rate,
+                                 left_rpm, right_rpm, dist, 14.8f, diag_flags, imu_err);
     }
 }
 

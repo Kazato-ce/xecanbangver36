@@ -116,6 +116,26 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       </div>
     </header>
 
+    <!-- Thanh Chẩn Đoán Phần Cứng Real-Time -->
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: center;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">STM32 UART:</span>
+        <span id="badgeStmLink" class="badge" style="background:var(--red); padding:3px 8px; font-size:0.75rem;">MẤT TÍN HIỆU</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">MPU6050:</span>
+        <span id="badgeMpu" class="badge" style="background:var(--muted); padding:3px 8px; font-size:0.75rem;">CHỜ TÍN HIỆU</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">SÓNG NRF24:</span>
+        <span id="badgeNrf" class="badge" style="background:var(--muted); padding:3px 8px; font-size:0.75rem;">CHỜ TÍN HIỆU</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">TƯ THẾ XE:</span>
+        <span id="badgeUpright" class="badge" style="background:var(--yellow); color:#000; padding:3px 8px; font-size:0.75rem;">NGHIÊNG</span>
+      </div>
+    </div>
+
     <!-- Hàng thông số chính -->
     <div class="grid-4">
       <div class="card">
@@ -406,6 +426,57 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           const st = d.state || 0;
           b.innerText = stateNames[st] || "UNKNOWN";
           b.className = "badge " + (stateBadges[st] || "badge-boot");
+
+          // Cập nhật các trạng thái chẩn đoán phần cứng
+          const bLink = document.getElementById('badgeStmLink');
+          if (d.stm_link) {
+            bLink.innerText = "ĐÃ KẾT NỐI (UART OK)";
+            bLink.style.background = "var(--green)";
+            bLink.style.color = "#fff";
+          } else {
+            bLink.innerText = "MẤT TÍN HIỆU STM32";
+            bLink.style.background = "var(--red)";
+            bLink.style.color = "#fff";
+          }
+
+          const bMpu = document.getElementById('badgeMpu');
+          if (d.stm_link && d.mpu_ok) {
+            bMpu.innerText = "BÌNH THƯỜNG (0 LỖI)";
+            bMpu.style.background = "var(--green)";
+            bMpu.style.color = "#fff";
+          } else if (d.stm_link) {
+            bMpu.innerText = `LỖI I2C (${d.imu_err})`;
+            bMpu.style.background = "var(--red)";
+            bMpu.style.color = "#fff";
+          } else {
+            bMpu.innerText = "--";
+            bMpu.style.background = "var(--muted)";
+          }
+
+          const bNrf = document.getElementById('badgeNrf');
+          if (d.stm_link && d.nrf_ok) {
+            bNrf.innerText = "SẴN SÀNG (SPI2 OK)";
+            bNrf.style.background = "var(--green)";
+            bNrf.style.color = "#fff";
+          } else if (d.stm_link) {
+            bNrf.innerText = "LỖI NRF XE";
+            bNrf.style.background = "var(--red)";
+            bNrf.style.color = "#fff";
+          } else {
+            bNrf.innerText = "--";
+            bNrf.style.background = "var(--muted)";
+          }
+
+          const bUpr = document.getElementById('badgeUpright');
+          if (d.upright) {
+            bUpr.innerText = "SẴN SÀNG ARM (±3.5°)";
+            bUpr.style.background = "var(--green)";
+            bUpr.style.color = "#fff";
+          } else {
+            bUpr.innerText = "ĐANG NGHIÊNG";
+            bUpr.style.background = "var(--yellow)";
+            bUpr.style.color = "#000";
+          }
 
           // Update chart
           historyPitch.shift();

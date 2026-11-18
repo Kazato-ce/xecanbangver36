@@ -44,6 +44,21 @@ static uint16_t s_seq = 0;
 static uint32_t s_last_tx_ms = 0;
 static bool s_radio_ok = false;
 
+// Trạng thái chẩn đoán hệ thống thu được từ STM32 qua Telemetry
+static uint32_t s_last_telem_ms = 0;
+static bool     s_last_mpu_ok = false;
+static bool     s_last_nrf_ok = false;
+static bool     s_last_spm_ok = false;
+static bool     s_last_upright = false;
+static bool     s_last_motoren = false;
+static float    s_last_pitch = 0.0f;
+static float    s_last_rate = 0.0f;
+static uint16_t s_last_dist = 0;
+static float    s_last_bat = 0.0f;
+static uint8_t  s_last_state = 0;
+static uint8_t  s_last_fault = 0;
+static uint8_t  s_last_imu_err = 0;
+
 // Trạng thái điều khiển hiện tại
 static int16_t s_current_drive = 0;   // -1000..1000
 static int16_t s_current_steer = 0;   // -1000..1000
@@ -190,7 +205,22 @@ void processCommandLine(String line) {
     s_current_steer = 0;
     Serial.println("ACK: STOP");
   } else if (line.equalsIgnoreCase("PING")) {
-    Serial.printf("PONG: RADIO_OK=%d\n", s_radio_ok ? 1 : 0);
+    bool stm_link = (s_last_telem_ms > 0 && (millis() - s_last_telem_ms < 1500));
+    Serial.printf("PONG: RADIO_OK=%d, STM32_LINK=%d, MPU_OK=%d, SPM_OK=%d\n",
+                  s_radio_ok ? 1 : 0, stm_link ? 1 : 0, s_last_mpu_ok ? 1 : 0, s_last_spm_ok ? 1 : 0);
+  } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("CHECK")) {
+    bool stm_link = (s_last_telem_ms > 0 && (millis() - s_last_telem_ms < 1500));
+    const char *st_names[] = {"BOOT", "CALIB", "DISARMED", "ARMED", "FAULT"};
+    const char *st_str = (s_last_state <= 4) ? st_names[s_last_state] : "UNKNOWN";
+
+    Serial.println("\n--- [BÁO CÁO CHẨN ĐOÁN TOÀN BỘ PHẦN CỨNG] ---");
+    Serial.printf(" 1. ESP32 DevKit NRF24 Local : %s\n", s_radio_ok ? "🟢 SẴN SÀNG (Kênh 76 @ 1Mbps)" : "🔴 LỖI PHẦN CỨNG SPI");
+    Serial.printf(" 2. Sóng NRF24 STM32 (Xe)    : %s\n", stm_link ? "🟢 ĐÃ KẾT NỐI (Nhận ACK Telemetry 20Hz)" : "🔴 MẤT SÓNG / CHƯA CÓ TÍN HIỆU");
+    Serial.printf(" 3. Cảm biến MPU6050         : %s (Góc pitch: %+.2f°, Lỗi I2C: %u)\n", s_last_mpu_ok ? "🟢 HOẠT ĐỘNG TỐT" : "🔴 LỖI I2C / CHƯA HIỆU CHUẨN", s_last_pitch, s_last_imu_err);
+    Serial.printf(" 4. ESP32 Super Mini UART    : %s\n", s_last_spm_ok ? "🟢 THÔNG SUỐT (Đang kết nối UART1 PA9/PA10)" : "⚪ CHƯA NỐI UART / CHƯA BẬT WEB");
+    Serial.printf(" 5. Trạng thái Xe Cân Bằng   : %s (State=%d) | Động cơ EN: %s | Tư thế: %s\n",
+                  st_str, s_last_state, s_last_motoren ? "BẬT (LOW)" : "TẮT (HIGH)", s_last_upright ? "DỰNG THẲNG SẴN SÀNG ARM" : "ĐANG NGHIÊNG");
+    Serial.println("----------------------------------------------\n");
   } else if (line == "?") {
     printMenu();
   }
@@ -249,9 +279,26 @@ void loop() {
         TelemetryPacket_t rxTelem;
         radio.read(&rxTelem, sizeof(TelemetryPacket_t));
         if (rxTelem.magic == PROTOCOL_TELEMETRY_MAGIC) {
-          Serial.printf("[STM32 Telemetry] State=%d, Pitch=%.2f deg, Dist=%u cm, Bat=%.2f V\n",
-                        rxTelem.state, (float)rxTelem.pitch_cd / 100.0f,
-                        rxTelem.dist_front_cm, (float)rxTelem.bat_mv / 1000.0f);
+          s_last_telem_ms = now;
+          s_last_mpu_ok   = (rxTelem.diag_flags & DIAG_FLAG_MPU_OK) != 0;
+          s_last_nrf_ok   = (rxTelem.diag_flags & DIAG_FLAG_NRF_OK) != 0;
+          s_last_spm_ok   = (rxTelem.diag_flags & DIAG_FLAG_SUPERMINI_OK) != 0;
+          s_last_upright  = (rxTelem.diag_flags & DIAG_FLAG_UPRIGHT_READY) != 0;
+          s_last_motoren  = (rxTelem.diag_flags & DIAG_FLAG_STEPPERS_ENABLED) != 0;
+          s_last_pitch    = (float)rxTelem.pitch_cd / 100.0f;
+          s_last_rate     = (float)rxTelem.rate_cd / 100.0f;
+          s_last_dist     = rxTelem.dist_front_cm;
+          s_last_bat      = (float)rxTelem.bat_mv / 1000.0f;
+          s_last_state    = rxTelem.state;
+          s_last_fault    = rxTelem.fault;
+          s_last_imu_err  = rxTelem.imu_err_cnt;
+
+          // In chuỗi Telemetry chi tiết cho Python GCS & Serial Monitor
+          Serial.printf("[STM32 Telemetry] State=%d, Pitch=%.2f deg, Rate=%.2f dps, Dist=%u cm, Bat=%.2f V, MPU=%d, NRF=%d, SPM=%d, Upright=%d, MotorEN=%d, ImuErr=%u\n",
+                        s_last_state, s_last_pitch, s_last_rate,
+                        s_last_dist, s_last_bat,
+                        s_last_mpu_ok ? 1 : 0, s_last_nrf_ok ? 1 : 0, s_last_spm_ok ? 1 : 0,
+                        s_last_upright ? 1 : 0, s_last_motoren ? 1 : 0, s_last_imu_err);
         }
       }
     } else {
@@ -264,10 +311,17 @@ void loop() {
       s_last_log_ms = now;
       if (tx_ok) {
         float pdr = (s_ok_cnt + s_fail_cnt > 0) ? (s_ok_cnt * 100.0f / (s_ok_cnt + s_fail_cnt)) : 100.0f;
-        Serial.printf("[KẾT NỐI TỐT] Sóng NRF OK | Gói #%u | Tỉ lệ ACK: %.1f%%\n", s_seq, pdr);
+        const char *st_names[] = {"BOOT", "CALIB", "DISARMED", "ARMED", "FAULT"};
+        const char *st_str = (s_last_state <= 4) ? st_names[s_last_state] : "UNKNOWN";
+        Serial.printf("[KẾT NỐI TỐT] Sóng NRF OK (ACK: %.0f%%) | Xe: %s | MPU6050: %s (%+.2f°) | SuperMini: %s | Tư thế: %s\n",
+                      pdr, st_str,
+                      s_last_mpu_ok ? "OK" : "LỖI I2C",
+                      s_last_pitch,
+                      s_last_spm_ok ? "ĐÃ NỐI UART" : "CHƯA NỐI",
+                      s_last_upright ? "SẴN SÀNG ARM" : "NGHIÊNG");
       } else {
-        Serial.printf("[CHỜ TÍN HIỆU XE] Đang gửi lệnh... Chưa nhận được ACK từ STM32 (Thử: %u lần)\n",
-                      s_seq);
+        Serial.printf("[CHỜ TÍN HIỆU XE] Đang phát lệnh NRF24 (Kênh %u)... Chưa nhận được phản hồi từ STM32 (Thử: %u lần | NRF Local: OK)\n",
+                      RADIO_CHANNEL, s_seq);
       }
     }
 

@@ -8,6 +8,12 @@
 #define PROTOCOL_VERSION            0x01
 #define PROTOCOL_TELEMETRY_MAGIC    0xBB
 
+#define DIAG_FLAG_MPU_OK            (1 << 0) /* MPU6050 WHO_AM_I OK & Gyro Calibrated */
+#define DIAG_FLAG_NRF_OK            (1 << 1) /* NRF24 on STM32 SPI2 initialized */
+#define DIAG_FLAG_SUPERMINI_OK      (1 << 2) /* STM32 UART1 received data from Super Mini within 2s */
+#define DIAG_FLAG_UPRIGHT_READY     (1 << 3) /* Vehicle pitch within ±3.5° (safe to ARM) */
+#define DIAG_FLAG_STEPPERS_ENABLED  (1 << 4) /* TMC2208 EN = LOW (Motors enabled) */
+
 typedef enum {
     CMD_DISARM  = 0x00,
     CMD_ARM     = 0x01,
@@ -41,6 +47,8 @@ typedef struct {
     int16_t  rpm_right;     /* RPM * 10 */
     uint16_t dist_front_cm; /* Obstacle distance (cm) */
     uint16_t bat_mv;        /* Battery voltage (mV) */
+    uint8_t  diag_flags;    /* Hardware diagnostic bitflags: DIAG_FLAG_* */
+    uint8_t  imu_err_cnt;   /* Consecutive IMU error count */
     uint16_t checksum;
 } TelemetryPacket_t;
 #pragma pack(pop)

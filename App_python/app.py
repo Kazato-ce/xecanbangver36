@@ -87,6 +87,13 @@ class GroundStationApp:
         self.tx_count = 0
         self.rx_count = 0
 
+        # Biến chẩn đoán phần cứng (Hardware Health Diagnostics)
+        self.diag_mpu_ok = False
+        self.diag_nrf_ok = False
+        self.diag_spm_ok = False
+        self.diag_upright = False
+        self.diag_imu_err = 0
+
         # Thiết lập giao diện
         self._setup_styles()
         self._build_header()
@@ -487,17 +494,19 @@ class GroundStationApp:
 
         # Cập nhật trạng thái kết nối từ thông báo của ESP32 DevKit
         if "KẾT NỐI TỐT" in line or "Sóng NRF OK" in line:
+            self.diag_nrf_ok = True
             if hasattr(self, 'lbl_rf_link'):
                 self.lbl_rf_link.config(text="● SÓNG NRF: ĐÃ BẮT SÓNG XE (ACK OK)", fg=THEME["success"])
             if self.robot_state_str in ("DISCONNECTED", "WAITING...", "NO_RADIO"):
                 self.robot_state_str = "CONNECTED"
-                self._update_telemetry_widgets()
+            self._update_telemetry_widgets()
         elif "CHỜ TÍN HIỆU XE" in line or "Chưa nhận được ACK" in line:
+            self.diag_nrf_ok = False
             if hasattr(self, 'lbl_rf_link'):
-                self.lbl_rf_link.config(text="● SÓNG NRF: CHƯA THẤY XE (KIỂM TRA NGUỒN STM32)", fg=THEME["danger"])
+                self.lbl_rf_link.config(text="● SÓNG NRF: ĐANG TÌM XE (KIỂM TRA NGUỒN STM32)", fg=THEME["warning"])
             if self.robot_state_str == "CONNECTED":
                 self.robot_state_str = "WAITING..."
-                self._update_telemetry_widgets()
+            self._update_telemetry_widgets()
         elif "ACK: ARM" in line:
             self.robot_state_str = "ARMED"
             self._update_telemetry_widgets()
@@ -516,12 +525,18 @@ class GroundStationApp:
                     self.lbl_rf_link.config(text="● NRF24: LỖI PHẦN CỨNG", fg=THEME["danger"])
 
         # Phân tích dòng Telemetry từ STM32 gửi qua NRF24:
-        # Ví dụ: "[STM32 Telemetry] State=3, Pitch=1.25 deg, Dist=45 cm, Bat=15.80 V"
+        # Ví dụ: "[STM32 Telemetry] State=3, Pitch=1.25 deg, Dist=45 cm, Bat=15.80 V, MPU=1, NRF=1, SPM=1, Upright=1, MotorEN=1, ImuErr=0"
         if "Telemetry" in line or "Pitch=" in line:
+            self.diag_nrf_ok = True
             m_state = re.search(r"State=(\d+)", line)
             m_pitch = re.search(r"Pitch=([\+\-\d\.]+)", line)
             m_dist  = re.search(r"Dist=(\d+)", line)
             m_bat   = re.search(r"Bat=([\d\.]+)", line)
+            m_mpu   = re.search(r"MPU=(\d+)", line)
+            m_nrf   = re.search(r"NRF=(\d+)", line)
+            m_spm   = re.search(r"SPM=(\d+)", line)
+            m_upr   = re.search(r"Upright=(\d+)", line)
+            m_err   = re.search(r"ImuErr=(\d+)", line)
 
             if m_state:
                 st_val = int(m_state.group(1))
@@ -545,6 +560,12 @@ class GroundStationApp:
                     self.bat_v = float(m_bat.group(1))
                 except ValueError:
                     pass
+
+            if m_mpu: self.diag_mpu_ok = (int(m_mpu.group(1)) == 1)
+            if m_nrf: self.diag_nrf_ok = (int(m_nrf.group(1)) == 1)
+            if m_spm: self.diag_spm_ok = (int(m_spm.group(1)) == 1)
+            if m_upr: self.diag_upright = (int(m_upr.group(1)) == 1)
+            if m_err: self.diag_imu_err = int(m_err.group(1))
 
             self._update_telemetry_widgets()
 
@@ -600,6 +621,38 @@ class GroundStationApp:
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(2, weight=1)
         grid.columnconfigure(3, weight=1)
+
+        # Hàng chẩn đoán phần cứng chi tiết (Hardware Health Diagnostics)
+        diag_frame = tk.Frame(card, bg=THEME["card"], pady=4)
+        diag_frame.pack(fill=tk.X, pady=(4, 0))
+
+        # Ô D1: MPU6050
+        f_mpu = tk.Frame(diag_frame, bg=THEME["card_alt"], padx=6, pady=4, bd=1, relief=tk.SOLID)
+        f_mpu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        tk.Label(f_mpu, text="🩺 MPU6050", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack()
+        self.lbl_diag_mpu = tk.Label(f_mpu, text="⚪ CHỜ KẾT NỐI", font=("Segoe UI", 9, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"])
+        self.lbl_diag_mpu.pack()
+
+        # Ô D2: Sóng NRF24
+        f_nrf = tk.Frame(diag_frame, bg=THEME["card_alt"], padx=6, pady=4, bd=1, relief=tk.SOLID)
+        f_nrf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        tk.Label(f_nrf, text="📡 SÓNG NRF24", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack()
+        self.lbl_diag_nrf = tk.Label(f_nrf, text="⚪ CHƯA CÓ SÓNG", font=("Segoe UI", 9, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"])
+        self.lbl_diag_nrf.pack()
+
+        # Ô D3: ESP32 Super Mini UART
+        f_spm = tk.Frame(diag_frame, bg=THEME["card_alt"], padx=6, pady=4, bd=1, relief=tk.SOLID)
+        f_spm.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        tk.Label(f_spm, text="⚡ SUPER MINI UART", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack()
+        self.lbl_diag_spm = tk.Label(f_spm, text="⚪ CHƯA NỐI", font=("Segoe UI", 9, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"])
+        self.lbl_diag_spm.pack()
+
+        # Ô D4: Tư thế sẵn sàng ARM
+        f_upr = tk.Frame(diag_frame, bg=THEME["card_alt"], padx=6, pady=4, bd=1, relief=tk.SOLID)
+        f_upr.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        tk.Label(f_upr, text="📐 TƯ THẾ XE", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack()
+        self.lbl_diag_upright = tk.Label(f_upr, text="⚪ CHỜ TÍN HIỆU", font=("Segoe UI", 9, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"])
+        self.lbl_diag_upright.pack()
 
         # Thanh hiển thị độ nghiêng trực quan (Level Bar)
         tilt_frame = tk.Frame(card, bg=THEME["card"], pady=4)
@@ -664,6 +717,35 @@ class GroundStationApp:
                     text=f"⚠ XE ĐANG NGHIÊNG ({self.pitch_deg:+.1f}°) - CẦN DỰNG THẲNG TRONG VÙNG ±3.5° ĐỂ ARM",
                     fg=THEME["warning"]
                 )
+
+        # Cập nhật các ô chẩn đoán phần cứng (Hardware Diagnostics)
+        if hasattr(self, 'lbl_diag_mpu'):
+            if self.diag_mpu_ok:
+                self.lbl_diag_mpu.config(text=f"🟢 OK ({self.diag_imu_err} lỗi)", fg=THEME["success"])
+            elif self.robot_state_str not in ("DISCONNECTED", "WAITING..."):
+                self.lbl_diag_mpu.config(text=f"🔴 LỖI I2C ({self.diag_imu_err})", fg=THEME["danger"])
+            else:
+                self.lbl_diag_mpu.config(text="⚪ CHỜ XE", fg=THEME["subtext"])
+
+        if hasattr(self, 'lbl_diag_nrf'):
+            if self.diag_nrf_ok:
+                self.lbl_diag_nrf.config(text="🟢 ĐÃ KẾT NỐI (ACK OK)", fg=THEME["success"])
+            elif self.serial_running:
+                self.lbl_diag_nrf.config(text="🔴 MẤT SÓNG XE", fg=THEME["danger"])
+            else:
+                self.lbl_diag_nrf.config(text="⚪ CHƯA MỞ COM", fg=THEME["subtext"])
+
+        if hasattr(self, 'lbl_diag_spm'):
+            if self.diag_spm_ok:
+                self.lbl_diag_spm.config(text="🟢 ĐÃ NỐI UART1", fg=THEME["success"])
+            else:
+                self.lbl_diag_spm.config(text="⚪ CHƯA NỐI", fg=THEME["subtext"])
+
+        if hasattr(self, 'lbl_diag_upright'):
+            if self.diag_upright:
+                self.lbl_diag_upright.config(text="🟢 SẴN SÀNG ARM (±3.5°)", fg=THEME["success"])
+            else:
+                self.lbl_diag_upright.config(text=f"🟡 NGHIÊNG ({self.pitch_deg:+.1f}°)", fg=THEME["warning"])
 
         # Vẽ thanh Tilt visualizer
         self._draw_tilt_bar()

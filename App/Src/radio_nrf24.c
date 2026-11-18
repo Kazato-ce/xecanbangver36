@@ -255,7 +255,7 @@ void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, boo
     if (estop_req)  { *estop_req = s_cmd_estop; }
 }
 
-void radio_load_ack_telemetry(uint8_t state, uint8_t fault, float pitch_deg, float rate_dps, float left_rpm, float right_rpm, uint16_t dist_cm, float bat_v)
+void radio_load_ack_telemetry(uint8_t state, uint8_t fault, float pitch_deg, float rate_dps, float left_rpm, float right_rpm, uint16_t dist_cm, float bat_v, uint8_t diag_flags, uint8_t imu_err_cnt)
 {
     if (!s_hspi) return;
 
@@ -272,6 +272,8 @@ void radio_load_ack_telemetry(uint8_t state, uint8_t fault, float pitch_deg, flo
     telem.rpm_right     = (int16_t)(right_rpm * 10.0f);
     telem.dist_front_cm = dist_cm;
     telem.bat_mv        = (uint16_t)(bat_v * 1000.0f);
+    telem.diag_flags    = diag_flags;
+    telem.imu_err_cnt   = imu_err_cnt;
     telem.checksum      = protocol_calc_checksum((const uint8_t*)&telem, sizeof(TelemetryPacket_t) - 2);
 
     /* Xóa TX FIFO để không bị ứ đọng gói cũ */
