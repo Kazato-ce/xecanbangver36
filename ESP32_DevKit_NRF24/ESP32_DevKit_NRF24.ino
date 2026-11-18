@@ -140,18 +140,15 @@ void setup() {
     radio.setChannel(RADIO_CHANNEL);
     radio.setDataRate(RF24_1MBPS);
     radio.setPALevel(RF24_PA_HIGH);
-    radio.setRetries(5, 5); // delay 1500us, 5 retries
+    radio.setAutoAck(false); // CHẾ ĐỘ 1-CHIỀU: Tắt Auto-ACK để phát siêu tốc, không cần xe phản hồi
     radio.setPayloadSize(sizeof(RadioPacket_t));
-    radio.enableDynamicPayloads();
-    radio.enableAckPayload();
 
     // Mở pipe ghi sang STM32
     radio.openWritingPipe(RADIO_ADDR);
-    // Mở pipe đọc (nếu STM32 gửi ACK payload hoặc telemetry ngược)
-    radio.openReadingPipe(1, RADIO_ADDR);
-    radio.stopListening(); // Ở chế độ phát (Transmitter)
+    radio.stopListening(); // Ở chế độ phát thuần túy (Transmitter)
 
-    Serial.println("[OK] NRF24L01 ĐÃ KHỞI TẠO THÀNH CÔNG & SẴN SÀNG TRUYỀN TIN (Kênh 76 @ 1Mbps)!");
+    Serial.println("[OK] NRF24L01 ĐÃ SẴN SÀNG Ở CHẾ ĐỘ PHÁT 1-CHIỀU (Kênh 76 @ 1Mbps)!");
+    Serial.println("  -> Chế độ 1-chiều siêu nhanh, không chờ ACK, tiết kiệm pin tối đa cho xe!");
   }
 }
 
@@ -205,22 +202,16 @@ void processCommandLine(String line) {
     s_current_steer = 0;
     Serial.println("ACK: STOP");
   } else if (line.equalsIgnoreCase("PING")) {
-    bool stm_link = (s_last_telem_ms > 0 && (millis() - s_last_telem_ms < 1500));
-    Serial.printf("PONG: RADIO_OK=%d, STM32_LINK=%d, MPU_OK=%d, SPM_OK=%d\n",
-                  s_radio_ok ? 1 : 0, stm_link ? 1 : 0, s_last_mpu_ok ? 1 : 0, s_last_spm_ok ? 1 : 0);
+    Serial.println("PONG: MODE=1-WAY-TX, RADIO_OK=1");
   } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("CHECK")) {
-    bool stm_link = (s_last_telem_ms > 0 && (millis() - s_last_telem_ms < 1500));
-    const char *st_names[] = {"BOOT", "CALIB", "DISARMED", "ARMED", "FAULT"};
-    const char *st_str = (s_last_state <= 4) ? st_names[s_last_state] : "UNKNOWN";
-
-    Serial.println("\n--- [BÁO CÁO CHẨN ĐOÁN TOÀN BỘ PHẦN CỨNG] ---");
-    Serial.printf(" 1. ESP32 DevKit NRF24 Local : %s\n", s_radio_ok ? "🟢 SẴN SÀNG (Kênh 76 @ 1Mbps)" : "🔴 LỖI PHẦN CỨNG SPI");
-    Serial.printf(" 2. Sóng NRF24 STM32 (Xe)    : %s\n", stm_link ? "🟢 ĐÃ KẾT NỐI (Nhận ACK Telemetry 20Hz)" : "🔴 MẤT SÓNG / CHƯA CÓ TÍN HIỆU");
-    Serial.printf(" 3. Cảm biến MPU6050         : %s (Góc pitch: %+.2f°, Lỗi I2C: %u)\n", s_last_mpu_ok ? "🟢 HOẠT ĐỘNG TỐT" : "🔴 LỖI I2C / CHƯA HIỆU CHUẨN", s_last_pitch, s_last_imu_err);
-    Serial.printf(" 4. ESP32 Super Mini UART    : %s\n", s_last_spm_ok ? "🟢 THÔNG SUỐT (Đang kết nối UART1 PA9/PA10)" : "⚪ CHƯA NỐI UART / CHƯA BẬT WEB");
-    Serial.printf(" 5. Trạng thái Xe Cân Bằng   : %s (State=%d) | Động cơ EN: %s | Tư thế: %s\n",
-                  st_str, s_last_state, s_last_motoren ? "BẬT (LOW)" : "TẮT (HIGH)", s_last_upright ? "DỰNG THẲNG SẴN SÀNG ARM" : "ĐANG NGHIÊNG");
-    Serial.println("----------------------------------------------\n");
+    const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
+    Serial.println("\n--- [TRẠNG THÁI BỘ ĐIỀU KHIỂN PHÁT 1-CHIỀU] ---");
+    Serial.printf(" 1. ESP32 DevKit NRF24  : %s (Kênh 76 @ 1Mbps)\n", s_radio_ok ? "🟢 SẴN SÀNG" : "🔴 LỖI SPI PHẦN CỨNG");
+    Serial.printf(" 2. Chế độ truyền sóng  : 🟢 1-CHIỀU SIÊU TỐC (TX -> Xe RX)\n");
+    Serial.printf(" 3. Lệnh đang phát      : %s | Tốc độ: %d | Bẻ lái: %d | Số gói: #%u\n", cmd_str, s_current_drive, s_current_steer, s_seq);
+    Serial.printf(" 4. Tiết kiệm pin xe    : Tối đa (Xe chỉ thu ~20mA, không phát PA 120mA)\n");
+    Serial.printf(" 5. Xem Telemetry & PID : Kết nối WiFi ESP32 Super Mini (http://192.168.4.1)\n");
+    Serial.println("-----------------------------------------------\n");
   } else if (line == "?") {
     printMenu();
   }
@@ -246,7 +237,7 @@ void loop() {
 
   uint32_t now = millis();
 
-  // Gửi gói tin điều khiển định kỳ sang STM32 (mỗi 40 ms)
+  // Phát gói tin điều khiển 1-chiều định kỳ sang STM32 (mỗi 30 ms = 33 Hz)
   if (s_radio_ok && ((now - s_last_tx_ms) >= CONTROL_INTERVAL_MS)) {
     s_last_tx_ms = now;
 
@@ -263,76 +254,28 @@ void loop() {
     // Tính checksum
     txPacket.checksum = protocol_calc_checksum((const uint8_t*)&txPacket, sizeof(RadioPacket_t) - 2);
 
-    // Gửi qua sóng NRF24L01
-    bool tx_ok = radio.write(&txPacket, sizeof(RadioPacket_t));
+    // Gửi qua sóng NRF24L01 ở chế độ 1-chiều (không chờ ACK, gửi cực nhanh 0.15ms)
+    radio.write(&txPacket, sizeof(RadioPacket_t));
 
+    digitalWrite(PIN_LED, HIGH); // Nhấp nháy LED khi phát
+
+    // In thông báo trạng thái phát định kỳ mỗi 1 giây
     static uint32_t s_last_log_ms = 0;
-    static uint32_t s_ok_cnt = 0;
-    static uint32_t s_fail_cnt = 0;
-
-    if (tx_ok) {
-      s_ok_cnt++;
-      digitalWrite(PIN_LED, HIGH); // Sáng LED khi có ACK từ xe
-
-      // Nhận Telemetry gửi kèm trực tiếp trong gói ACK
-      if (radio.isAckPayloadAvailable()) {
-        TelemetryPacket_t rxTelem;
-        radio.read(&rxTelem, sizeof(TelemetryPacket_t));
-        if (rxTelem.magic == PROTOCOL_TELEMETRY_MAGIC) {
-          s_last_telem_ms = now;
-          s_last_mpu_ok   = (rxTelem.diag_flags & DIAG_FLAG_MPU_OK) != 0;
-          s_last_nrf_ok   = (rxTelem.diag_flags & DIAG_FLAG_NRF_OK) != 0;
-          s_last_spm_ok   = (rxTelem.diag_flags & DIAG_FLAG_SUPERMINI_OK) != 0;
-          s_last_upright  = (rxTelem.diag_flags & DIAG_FLAG_UPRIGHT_READY) != 0;
-          s_last_motoren  = (rxTelem.diag_flags & DIAG_FLAG_STEPPERS_ENABLED) != 0;
-          s_last_pitch    = (float)rxTelem.pitch_cd / 100.0f;
-          s_last_rate     = (float)rxTelem.rate_cd / 100.0f;
-          s_last_dist     = rxTelem.dist_front_cm;
-          s_last_bat      = (float)rxTelem.bat_mv / 1000.0f;
-          s_last_state    = rxTelem.state;
-          s_last_fault    = rxTelem.fault;
-          s_last_imu_err  = rxTelem.imu_err_cnt;
-
-          // In chuỗi Telemetry chi tiết cho Python GCS & Serial Monitor
-          Serial.printf("[STM32 Telemetry] State=%d, Pitch=%.2f deg, Rate=%.2f dps, Dist=%u cm, Bat=%.2f V, MPU=%d, NRF=%d, SPM=%d, Upright=%d, MotorEN=%d, ImuErr=%u\n",
-                        s_last_state, s_last_pitch, s_last_rate,
-                        s_last_dist, s_last_bat,
-                        s_last_mpu_ok ? 1 : 0, s_last_nrf_ok ? 1 : 0, s_last_spm_ok ? 1 : 0,
-                        s_last_upright ? 1 : 0, s_last_motoren ? 1 : 0, s_last_imu_err);
-        }
-      }
-    } else {
-      s_fail_cnt++;
-      digitalWrite(PIN_LED, LOW);
-    }
-
-    // In thông báo trạng thái kết nối định kỳ mỗi 1 giây
     if ((now - s_last_log_ms) >= 1000) {
       s_last_log_ms = now;
-      if (tx_ok) {
-        float pdr = (s_ok_cnt + s_fail_cnt > 0) ? (s_ok_cnt * 100.0f / (s_ok_cnt + s_fail_cnt)) : 100.0f;
-        const char *st_names[] = {"BOOT", "CALIB", "DISARMED", "ARMED", "FAULT"};
-        const char *st_str = (s_last_state <= 4) ? st_names[s_last_state] : "UNKNOWN";
-        Serial.printf("[KẾT NỐI TỐT] Sóng NRF OK (ACK: %.0f%%) | Xe: %s | MPU6050: %s (%+.2f°) | SuperMini: %s | Tư thế: %s\n",
-                      pdr, st_str,
-                      s_last_mpu_ok ? "OK" : "LỖI I2C",
-                      s_last_pitch,
-                      s_last_spm_ok ? "ĐÃ NỐI UART" : "CHƯA NỐI",
-                      s_last_upright ? "SẴN SÀNG ARM" : "NGHIÊNG");
-      } else {
-        Serial.printf("[CHỜ TÍN HIỆU XE] Đang phát lệnh NRF24 (Kênh %u)... Chưa nhận được phản hồi từ STM32 (Thử: %u lần | NRF Local: OK)\n",
-                      RADIO_CHANNEL, s_seq);
-      }
+      const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
+      Serial.printf("[TX 1-CHIỀU ĐANG PHÁT] Kênh %u @ 1Mbps | Gói #%u | Lệnh: %s | Tốc độ: %d | Rẽ: %d\n",
+                    RADIO_CHANNEL, s_seq, cmd_str, s_current_drive, s_current_steer);
     }
 
-    // Nếu vừa gửi lệnh ARM/ESTOP một lần thì đưa về chế độ duy trì DRIVE
+    // Nếu vừa gửi lệnh ARM/ESTOP thì chuyển sang duy trì lệnh DRIVE
     if (s_pending_cmd == CMD_ARM) {
       s_pending_cmd = CMD_DRIVE;
     }
   }
 
-  // Tắt LED sau 15ms
-  if ((now - s_last_tx_ms) > 15) {
+  // Tắt LED sau 10ms
+  if ((now - s_last_tx_ms) > 10) {
     digitalWrite(PIN_LED, LOW);
   }
 }

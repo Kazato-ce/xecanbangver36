@@ -493,7 +493,14 @@ class GroundStationApp:
         self.log_console(f"RX: {line}", "RX")
 
         # Cập nhật trạng thái kết nối từ thông báo của ESP32 DevKit
-        if "KẾT NỐI TỐT" in line or "Sóng NRF OK" in line:
+        if "TX 1-CHIỀU" in line or "1-WAY-TX" in line:
+            self.diag_nrf_ok = True
+            if hasattr(self, 'lbl_rf_link'):
+                self.lbl_rf_link.config(text="● SÓNG NRF: ĐANG PHÁT 1-CHIỀU (TIẾT KIỆM PIN XE)", fg=THEME["success"])
+            if self.robot_state_str in ("DISCONNECTED", "WAITING...", "NO_RADIO"):
+                self.robot_state_str = "TX 1-CHIỀU (SẴN SÀNG)"
+            self._update_telemetry_widgets()
+        elif "KẾT NỐI TỐT" in line or "Sóng NRF OK" in line:
             self.diag_nrf_ok = True
             if hasattr(self, 'lbl_rf_link'):
                 self.lbl_rf_link.config(text="● SÓNG NRF: ĐÃ BẮT SÓNG XE (ACK OK)", fg=THEME["success"])
@@ -679,7 +686,8 @@ class GroundStationApp:
             "DISARMED": THEME["warning"],
             "CALIBRATING": THEME["accent"],
             "BOOT": THEME["primary"],
-            "FAULT": THEME["danger"]
+            "FAULT": THEME["danger"],
+            "TX 1-CHIỀU (SẴN SÀNG)": THEME["primary"]
         }
         col = st_colors.get(self.robot_state_str, THEME["subtext"])
         self.lbl_telem_state.config(text=self.robot_state_str, fg=col)

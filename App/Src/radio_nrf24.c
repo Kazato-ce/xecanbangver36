@@ -131,8 +131,8 @@ bool radio_init(SPI_HandleTypeDef *hspi)
         }
     }
 
-    /* Auto-Ack on Pipe 0 */
-    nrf_write_reg(NRF_REG_EN_AA, 0x01);
+    /* Tắt Auto-Ack: Chế độ 1-chiều thuần túy, xe chỉ thu, tiết kiệm pin tối đa */
+    nrf_write_reg(NRF_REG_EN_AA, 0x00);
 
     /* Enable RX Pipe 0 */
     nrf_write_reg(NRF_REG_EN_RXADDR, 0x01);
@@ -140,8 +140,8 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     /* Address width = 5 bytes */
     nrf_write_reg(NRF_REG_SETUP_AW, 0x03);
 
-    /* Auto retransmit: 750us, 5 retries */
-    nrf_write_reg(NRF_REG_SETUP_RETR, 0x25);
+    /* Tắt tự động truyền lại trong chế độ chỉ thu */
+    nrf_write_reg(NRF_REG_SETUP_RETR, 0x00);
 
     /* RF Channel */
     nrf_write_reg(NRF_REG_RF_CH, RADIO_CHANNEL);
@@ -149,7 +149,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     /* 1 Mbps, 0 dBm (RF_PWR=11, RF_DR_HIGH=0, RF_DR_LOW=0) */
     nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
 
-    /* RX Payload width for Pipe 0 */
+    /* RX Payload width cố định cho Pipe 0: 16 bytes */
     nrf_write_reg(NRF_REG_RX_PW_P0, sizeof(RadioPacket_t));
 
     /* RX Address Pipe 0 */
@@ -160,16 +160,9 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     nrf_send_cmd(NRF_CMD_FLUSH_RX);
     nrf_send_cmd(NRF_CMD_FLUSH_TX);
 
-    /* Kích hoạt tính năng ACK Payload và Dynamic Payload (lệnh 0x50 0x73) */
-    uint8_t act_cmd[2] = { 0x50, 0x73 };
-    csn_low();
-    HAL_SPI_Transmit(s_hspi, act_cmd, 2, 5);
-    csn_high();
-
-    /* Bật EN_DPL (bit 2) và EN_ACK_PAY (bit 1) trong thanh ghi FEATURE (0x1D) */
-    nrf_write_reg(0x1D, 0x06);
-    /* Bật Dynamic Payload trên Pipe 0 trong thanh ghi DYNPD (0x1C) */
-    nrf_write_reg(0x1C, 0x01);
+    /* Tắt tính năng Dynamic Payload và ACK Payload để giữ chế độ 1-chiều siêu ổn định */
+    nrf_write_reg(0x1D, 0x00); /* FEATURE = 0 */
+    nrf_write_reg(0x1C, 0x00); /* DYNPD = 0 */
 
     /* Clear interrupts */
     nrf_write_reg(NRF_REG_STATUS, 0x70);
@@ -177,7 +170,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     /* Power up, PRX mode, 2-byte CRC (EN_CRC=1, CRCO=1, PWR_UP=1, PRIM_RX=1) */
     nrf_write_reg(NRF_REG_CONFIG, 0x0F);
 
-    ce_high(); /* Bắt đầu lắng nghe RX */
+    ce_high(); /* Bắt đầu lắng nghe RX liên tục */
     HAL_Delay(2);
 
     return true;
@@ -257,34 +250,8 @@ void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, boo
 
 void radio_load_ack_telemetry(uint8_t state, uint8_t fault, float pitch_deg, float rate_dps, float left_rpm, float right_rpm, uint16_t dist_cm, float bat_v, uint8_t diag_flags, uint8_t imu_err_cnt)
 {
-    if (!s_hspi) return;
-
-    static uint16_t s_telem_seq = 0;
-    TelemetryPacket_t telem;
-    telem.magic         = PROTOCOL_TELEMETRY_MAGIC;
-    telem.version       = PROTOCOL_VERSION;
-    telem.seq           = s_telem_seq++;
-    telem.state         = state;
-    telem.fault         = fault;
-    telem.pitch_cd      = (int16_t)(pitch_deg * 100.0f);
-    telem.rate_cd       = (int16_t)(rate_dps * 100.0f);
-    telem.rpm_left      = (int16_t)(left_rpm * 10.0f);
-    telem.rpm_right     = (int16_t)(right_rpm * 10.0f);
-    telem.dist_front_cm = dist_cm;
-    telem.bat_mv        = (uint16_t)(bat_v * 1000.0f);
-    telem.diag_flags    = diag_flags;
-    telem.imu_err_cnt   = imu_err_cnt;
-    telem.checksum      = protocol_calc_checksum((const uint8_t*)&telem, sizeof(TelemetryPacket_t) - 2);
-
-    /* Xóa TX FIFO để không bị ứ đọng gói cũ */
-    nrf_send_cmd(NRF_CMD_FLUSH_TX);
-
-    /* Ghi gói tin vào ACK Payload của Pipe 0: mã lệnh 0xA8 | pipe (0xA8) */
-    uint8_t tx[sizeof(TelemetryPacket_t) + 1];
-    tx[0] = 0xA8;
-    memcpy(&tx[1], &telem, sizeof(TelemetryPacket_t));
-
-    csn_low();
-    HAL_SPI_Transmit(s_hspi, tx, sizeof(tx), 10);
-    csn_high();
+    /* Trong chế độ 1-chiều thuần túy: Không phát ACK Payload ngược lại để tiết kiệm pin tối đa cho xe */
+    (void)state; (void)fault; (void)pitch_deg; (void)rate_dps;
+    (void)left_rpm; (void)right_rpm; (void)dist_cm; (void)bat_v;
+    (void)diag_flags; (void)imu_err_cnt;
 }
