@@ -248,6 +248,10 @@ void setup() {
   Serial.println("  ESP32-S3 Super Mini - Robot Web Dashboard & PID");
   Serial.println("==============================================");
 
+  #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ESP32S3)
+  Serial0.end(); // Giải phóng chân GPIO 43/44 nếu UART0 mặc định đang gán
+  #endif
+
   // Khởi tạo UART1 nối với STM32 (PA9 TX, PA10 RX)
   Serial1.begin(STM32_BAUDRATE, SERIAL_8N1, STM32_RX_PIN, STM32_TX_PIN);
   Serial.printf("UART1 khoi tao: RX=GPIO%d, TX=GPIO%d @ %d baud\n",
@@ -333,9 +337,13 @@ void loop() {
   digitalWrite(PIN_LED, stm_alive ? HIGH : LOW);
   #endif
 
+  static uint32_t s_rx_bytes_total = 0;
+  static uint32_t s_last_diag_ms = 0;
+
   // Đọc dữ liệu từ STM32 qua UART1
   while (Serial1.available() > 0) {
     char c = (char)Serial1.read();
+    s_rx_bytes_total++;
     if (c == '\n' || c == '\r') {
       if (rxBuffer.length() > 0) {
         parseTelemetryFrame(rxBuffer);
@@ -343,9 +351,21 @@ void loop() {
       }
     } else {
       rxBuffer += c;
-      if (rxBuffer.length() > 250) {
+      if (rxBuffer.length() > 600) {
         rxBuffer = ""; // Tránh tràn bộ nhớ
       }
+    }
+  }
+
+  uint32_t now = millis();
+  if (now - s_last_diag_ms >= 1500) {
+    s_last_diag_ms = now;
+    if (telem.last_rx_ms > 0 && (now - telem.last_rx_ms < 2000)) {
+      Serial.printf("[STM32 KẾT NỐI TỐT 🟢] Đã nhận %u bytes | Góc Pitch: %.2f° | Trạng thái: %d\n",
+                    s_rx_bytes_total, telem.pitch, telem.state);
+    } else {
+      Serial.printf("[CHỜ STM32 ⏳] Chưa nhận được gói tin (Tổng nhận: %u bytes). Kiểm tra dây PA9 -> RX(44) và GND!\n",
+                    s_rx_bytes_total);
     }
   }
 }

@@ -66,7 +66,8 @@ void telemetry_uart_init(void)
     huart1.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart1);
 
-    HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+    /* Đặt mức ưu tiên IRQ = 3 (cao hơn TIM6 ưu tiên 4 để không bao giờ bị nghẽn ORE) */
+    HAL_NVIC_SetPriority(USART1_IRQn, 3, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
 
     s_rx_head = 0;
@@ -89,6 +90,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
+        /* Xóa triệt để các cờ lỗi phần cứng ORE, NE, FE, PE tránh treo vĩnh viễn */
+        __HAL_UART_CLEAR_OREFLAG(&huart1);
+        __HAL_UART_CLEAR_NEFLAG(&huart1);
+        __HAL_UART_CLEAR_FEFLAG(&huart1);
+        __HAL_UART_CLEAR_PEFLAG(&huart1);
+        volatile uint32_t dummy = huart1.Instance->SR;
+        dummy = huart1.Instance->DR;
+        (void)dummy;
+        huart1.ErrorCode = HAL_UART_ERROR_NONE;
+        huart1.RxState = HAL_UART_STATE_READY;
         HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1);
     }
 }
@@ -111,7 +122,16 @@ void telemetry_uart_rx_isr(void)
 
 static void uart_send_string(const char *str)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), 20);
+    uint16_t len = (uint16_t)strlen(str);
+    if (len == 0) return;
+
+    /* Tự phục hồi state nếu trước đó bị lỗi hoặc timeout */
+    if (huart1.gState != HAL_UART_STATE_READY) {
+        huart1.gState = HAL_UART_STATE_READY;
+    }
+
+    /* Timeout 80ms: Đủ thời gian truyền cả chuỗi mà không bị cắt cụt do ngắt TIM7/TIM6 */
+    HAL_UART_Transmit(&huart1, (const uint8_t*)str, len, 80);
 }
 
 static void process_json_command(const char *line)
@@ -254,8 +274,6 @@ static void send_telemetry(void)
     balance_get_pid(&kp, &kd, &ki, &kp_s, &ki_s, &steer);
 
     uint16_t dist_f = ultrasonic_get_dist_cm(US_FRONT);
-    uint16_t dist_l = ultrasonic_get_dist_cm(US_LEFT);
-    uint16_t dist_r = ultrasonic_get_dist_cm(US_RIGHT);
     uint16_t tof_mm = tof_get_distance_mm();
 
     VehicleState_t state = sm_get_state();
@@ -265,26 +283,38 @@ static void send_telemetry(void)
     uint32_t imu_err = imu_get_error_count();
     bool nrf_ok = radio_check_hardware(NULL, NULL, NULL);
     bool spm_ok = telemetry_uart_is_supermini_linked();
-    bool upright = (fabsf(pitch) <= 3.5f);
+    bool upright = (fabsf(pitch - balance_get_target_offset()) <= ARM_UPRIGHT_ANGLE_DEG);
+    float arm_cd = sm_get_auto_arm_countdown_s();
 
-    char buf[360];
+    char buf[320];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"telemetry\",\"seq\":%lu,\"state\":%d,\"fault\":%d,\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
         "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,"
-        "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":14.8,"
-        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_ok\":%s,\"supermini_ok\":%s,\"upright\":%s}\r\n",
+        "\"dist_f\":%u,\"tof_mm\":%u,\"bat\":14.8,"
+        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_ok\":%s,\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
         (unsigned long)s_telemetry_seq++, (int)state, (int)fault,
         pitch, target_pitch, rate,
         left_rpm, right_rpm, kp, kd, ki,
-        (unsigned)dist_f, (unsigned)dist_l, (unsigned)dist_r, (unsigned)tof_mm,
+        (unsigned)dist_f, (unsigned)tof_mm,
         mpu_ok ? "true" : "false", (unsigned long)imu_err,
-        nrf_ok ? "true" : "false", spm_ok ? "true" : "false", upright ? "true" : "false");
+        nrf_ok ? "true" : "false", spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd);
 
     uart_send_string(buf);
 }
 
 void telemetry_uart_update(uint32_t current_time_ms)
 {
+    /* Tự động kích hoạt lại RX interrupt nếu bị treo hoặc mất cờ */
+    if (huart1.RxState != HAL_UART_STATE_BUSY_RX) {
+        __HAL_UART_CLEAR_OREFLAG(&huart1);
+        volatile uint32_t dummy = huart1.Instance->SR;
+        dummy = huart1.Instance->DR;
+        (void)dummy;
+        huart1.ErrorCode = HAL_UART_ERROR_NONE;
+        huart1.RxState = HAL_UART_STATE_READY;
+        HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1);
+    }
+
     /* Đọc ký tự từ ring buffer */
     while (s_rx_head != s_rx_tail) {
         char ch = (char)s_rx_ring[s_rx_tail];
