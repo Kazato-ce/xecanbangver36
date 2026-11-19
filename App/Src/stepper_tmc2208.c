@@ -129,7 +129,7 @@ void stepper_set_speed(MotorId_t motor, float steps_per_sec_signed)
 static void apply_step_rate(MotorState_t *m, float rate_signed)
 {
     float abs_rate = fabsf(rate_signed);
-    if (abs_rate < 12.0f) {
+    if (abs_rate < 18.0f) { /* Deadband chống rung giật & tiếng rè ở tốc độ siêu chậm quanh 0 */
         m->dds_inc = 0;
         m->applied_steps_s = 0.0f;
         return;
