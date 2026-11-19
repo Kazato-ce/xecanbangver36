@@ -8,15 +8,18 @@
 //   STM32 PA9  (TX)  ----->  ESP32 RXD (Mặc định GPIO 44 trên ESP32-S3, hoặc GPIO 16 trên ESP32 thường)
 //   STM32 PA10 (RX)  <-----  ESP32 TXD (Mặc định GPIO 43 trên ESP32-S3, hoặc GPIO 17 trên ESP32 thường)
 //   STM32 GND        <=====> ESP32 GND (BẮT BUỘC NỐI CHUNG MASS GND)
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  #define STM32_RX_PIN       44    // ESP32-S3 Super Mini RX (nhận từ PA9)
-  #define STM32_TX_PIN       43    // ESP32-S3 Super Mini TX (gửi sang PA10)
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  #define STM32_RX_PIN       20    // ESP32-C3 Super Mini RX (chân RX / GPIO 20)
-  #define STM32_TX_PIN       21    // ESP32-C3 Super Mini TX (chân TX / GPIO 21)
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ESP32S3)
+  #define STM32_RX_PIN       44    // ESP32-S3 Super Mini RX (chân ghi chữ RX trên board / GPIO 44)
+  #define STM32_TX_PIN       43    // ESP32-S3 Super Mini TX (chân ghi chữ TX trên board / GPIO 43)
+  #define PIN_LED            48    // Đèn LED tích hợp trên ESP32-S3 Super Mini
+#elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV) || defined(ESP32C3)
+  #define STM32_RX_PIN       20    // ESP32-C3 Super Mini RX (chân ghi chữ RX trên board / GPIO 20)
+  #define STM32_TX_PIN       21    // ESP32-C3 Super Mini TX (chân ghi chữ TX trên board / GPIO 21)
+  #define PIN_LED            8     // Đèn LED trên ESP32-C3
 #else
   #define STM32_RX_PIN       16    // ESP32 DevKit / Super Mini thường RX
   #define STM32_TX_PIN       17    // ESP32 DevKit / Super Mini thường TX
+  #define PIN_LED            2     // Đèn LED trên ESP32 DevKit
 #endif
 
 #define STM32_BAUDRATE     115200

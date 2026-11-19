@@ -232,8 +232,20 @@ void handleDrive() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  #ifdef PIN_LED
+  pinMode(PIN_LED, OUTPUT);
+  // Chớp LED xác nhận khởi động
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(PIN_LED, HIGH);
+    delay(100);
+    digitalWrite(PIN_LED, LOW);
+    delay(100);
+  }
+  #endif
+
   Serial.println("\n==============================================");
-  Serial.println("  ESP32 Super Mini - Robot Web Dashboard & PID");
+  Serial.println("  ESP32-S3 Super Mini - Robot Web Dashboard & PID");
   Serial.println("==============================================");
 
   // Khởi tạo UART1 nối với STM32 (PA9 TX, PA10 RX)
@@ -314,6 +326,12 @@ void setup() {
 void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
+
+  #ifdef PIN_LED
+  // Nếu nhận được dữ liệu từ STM32 (PA9) trong 500ms -> Bật đèn LED sáng liên tục
+  bool stm_alive = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 500));
+  digitalWrite(PIN_LED, stm_alive ? HIGH : LOW);
+  #endif
 
   // Đọc dữ liệu từ STM32 qua UART1
   while (Serial1.available() > 0) {

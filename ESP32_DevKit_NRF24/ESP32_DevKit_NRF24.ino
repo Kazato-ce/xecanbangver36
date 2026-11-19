@@ -36,11 +36,30 @@ static WebServer server(80);
 static DNSServer dnsServer;
 
 // ──────────────────────────────────────────────
-// Cấu hình chân phần cứng NRF24L01
+// Cấu hình chân phần cứng NRF24L01 theo từng loại chip ESP32
 // ──────────────────────────────────────────────
-#define PIN_CE                  4
-#define PIN_CSN                 5
-#define PIN_LED                 2     // Đèn LED tích hợp trên board ESP32
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ESP32S3)
+  #define PIN_CE                  9
+  #define PIN_CSN                 10
+  #define PIN_LED                 48    // LED trên ESP32-S3 Super Mini
+  #define PIN_SCK                 12
+  #define PIN_MISO                13
+  #define PIN_MOSI                11
+#elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV) || defined(ESP32C3)
+  #define PIN_CE                  4
+  #define PIN_CSN                 5
+  #define PIN_LED                 8     // LED trên ESP32-C3 Super Mini
+  #define PIN_SCK                 6
+  #define PIN_MISO                7
+  #define PIN_MOSI                10
+#else
+  #define PIN_CE                  4
+  #define PIN_CSN                 5
+  #define PIN_LED                 2     // Đèn LED tích hợp trên board ESP32 DevKit
+  #define PIN_SCK                 18
+  #define PIN_MISO                19
+  #define PIN_MOSI                23
+#endif
 
 #define RADIO_CHANNEL           76    // Kênh RF 2476 MHz (khớp với STM32)
 #define CONTROL_INTERVAL_MS     40    // Gửi lệnh mỗi 40 ms (25 Hz)
@@ -174,8 +193,8 @@ void setup() {
   digitalWrite(PIN_CE, LOW);   // CE ở mức LOW khi chờ
   delay(100);                  // Đợi module ổn định nguồn 3.3V
 
-  // Khởi tạo SPI cứng trên ESP32 (SCK=18, MISO=19, MOSI=23, SS=-1 để RF24 tự quản lý CSN)
-  SPI.begin(18, 19, 23, -1);
+  // Khởi tạo SPI cứng trên ESP32 theo từng loại board
+  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
   delay(50);
 
   // Thử khởi động module NRF24L01 với con trỏ bus SPI
