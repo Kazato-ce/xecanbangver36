@@ -135,6 +135,10 @@ void sm_update(float pitch_deg, bool radio_connected, bool arm_cmd, bool disarm_
                 }
             }
             break;
+
+        case STATE_TEST_MOTOR:
+        default:
+            break;
     }
 }
 

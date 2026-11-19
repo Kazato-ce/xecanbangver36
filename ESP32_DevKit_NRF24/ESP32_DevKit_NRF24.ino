@@ -244,10 +244,10 @@ void setup() {
     s_radio_ok = true;
     radio.setChannel(RADIO_CHANNEL);
     radio.setDataRate(RF24_1MBPS);
-    radio.setPALevel(RF24_PA_HIGH);
+    radio.setPALevel(RF24_PA_LOW);   // Dùng PA_LOW tránh bão hòa bộ khuếch đại LNA ở cự ly gần (<1m) và sụt áp 3.3V
     radio.setAutoAck(true);          // Bật Enhanced ShockBurst Auto-Ack chuẩn
-    radio.setRetries(5, 5);          // delay 1500us, 5 retries
-    radio.setPayloadSize(sizeof(RadioPacket_t)); // 16 bytes tĩnh
+    radio.setRetries(5, 15);         // delay 1500us, thử lại tối đa 15 lần (tối ưu Auto-ACK)
+    radio.setPayloadSize(sizeof(RadioPacket_t)); // 17 bytes tĩnh
 
     // Mở pipe ghi sang STM32
     radio.openWritingPipe(RADIO_ADDR);
@@ -258,7 +258,7 @@ void setup() {
     delay(1000);
     digitalWrite(PIN_LED, LOW);
 
-    Serial.println("[OK] NRF24L01 ĐÃ SẴN SÀNG TRUYỀN TIN (Kênh 76 @ 1Mbps)!");
+    Serial.println("[OK] NRF24L01 ĐÃ SẴN SÀNG TRUYỀN TIN (Kênh 76 @ 1Mbps, PA_LOW)!");
   }
 
   // Khởi tạo WiFi Access Point & Web Remote Server
@@ -413,11 +413,18 @@ void loop() {
 
     if (tx_ok) {
       s_consecutive_fails = 0;
-      digitalWrite(PIN_LED, HIGH); // XE ĐANG KẾT NỐI VÀ NHẬN LỆNH TỐT -> ĐÈN XANH SÁNG LIÊN TỤC!
+      digitalWrite(PIN_LED, HIGH); // XE ĐANG KẾT NỐI VÀ PHẢN HỒI AUTO-ACK TỐT -> ĐÈN XANH SÁNG LIÊN TỤC!
     } else {
       if (s_consecutive_fails < 255) s_consecutive_fails++;
       if (s_consecutive_fails >= 4) {
-        digitalWrite(PIN_LED, LOW); // Mất sóng xe hoặc xe chưa bật nguồn -> TẮT ĐÈN XANH
+        // Khi chưa nhận được ACK từ STM32: Nhấp nháy đèn LED đều 0.5s để người dùng biết ESP32 vẫn đang phát sóng tìm xe
+        static uint32_t s_last_blink_ms = 0;
+        static bool s_blink_state = false;
+        if ((now - s_last_blink_ms) >= 500) {
+          s_last_blink_ms = now;
+          s_blink_state = !s_blink_state;
+          digitalWrite(PIN_LED, s_blink_state ? HIGH : LOW);
+        }
       }
     }
 
@@ -427,10 +434,10 @@ void loop() {
       s_last_log_ms = now;
       const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
       if (s_consecutive_fails < 4) {
-        Serial.printf("[KẾT NỐI TỐT 🟢] Sóng NRF OK | Gói #%u | Lệnh: %s | Tốc độ: %d | Rẽ: %d | ĐÈN XANH SÁNG\n",
+        Serial.printf("[KẾT NỐI TỐT 🟢] Sóng NRF OK | Gói #%u | Lệnh: %s | Tốc độ: %d | Rẽ: %d | ĐÈN XANH SÁNG LIÊN TỤC\n",
                       s_seq, cmd_str, s_current_drive, s_current_steer);
       } else {
-        Serial.printf("[CHỜ TÍN HIỆU XE ⏳] Đang tìm xe STM32... (Gói #%u) | ĐÈN XANH TẮT | Hãy bật nguồn xe!\n", s_seq);
+        Serial.printf("[CHỜ TÍN HIỆU XE ⏳] Đang phát sóng tìm xe STM32... (Gói #%u) | ĐÈN XANH NHẤP NHÁY | Hãy bật nguồn xe!\n", s_seq);
       }
     }
 

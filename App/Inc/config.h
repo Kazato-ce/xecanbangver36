@@ -68,7 +68,7 @@
  * NRF24L01 Radio Configuration
  * ==================================================================== */
 #define RADIO_CHANNEL               76            /* Tần số 2476 MHz */
-#define RADIO_PAYLOAD_LEN           16            /* Bytes per packet */
+#define RADIO_PAYLOAD_LEN           17            /* Bytes per packet (sizeof(RadioPacket_t)) */
 #define RADIO_TX_ADDR               0xE7E7E7E7E7ULL
 #define RADIO_RX_ADDR               0xE7E7E7E7E7ULL
 
