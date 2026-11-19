@@ -131,8 +131,8 @@ bool radio_init(SPI_HandleTypeDef *hspi)
         }
     }
 
-    /* Tắt Auto-Ack: Chế độ 1-chiều thuần túy, xe chỉ thu, tiết kiệm pin tối đa */
-    nrf_write_reg(NRF_REG_EN_AA, 0x00);
+    /* Bật Auto-Ack Pipe 0: Chuẩn Enhanced ShockBurst (ESB) tương thích RF24 */
+    nrf_write_reg(NRF_REG_EN_AA, 0x01);
 
     /* Enable RX Pipe 0 */
     nrf_write_reg(NRF_REG_EN_RXADDR, 0x01);
@@ -140,7 +140,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     /* Address width = 5 bytes */
     nrf_write_reg(NRF_REG_SETUP_AW, 0x03);
 
-    /* Tắt tự động truyền lại trong chế độ chỉ thu */
+    /* Tự động truyền lại: không cần vì STM32 ở vai trò PRX */
     nrf_write_reg(NRF_REG_SETUP_RETR, 0x00);
 
     /* RF Channel */
@@ -152,9 +152,10 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     /* RX Payload width cố định cho Pipe 0: 16 bytes */
     nrf_write_reg(NRF_REG_RX_PW_P0, sizeof(RadioPacket_t));
 
-    /* RX Address Pipe 0 */
+    /* RX & TX Address Pipe 0 */
     const uint8_t rx_addr[5] = { 0xE7, 0xE7, 0xE7, 0xE7, 0xE7 };
     nrf_write_buf(NRF_REG_RX_ADDR_P0, rx_addr, 5);
+    nrf_write_buf(NRF_REG_TX_ADDR, rx_addr, 5);
 
     /* Flush FIFOs */
     nrf_send_cmd(NRF_CMD_FLUSH_RX);
@@ -180,15 +181,10 @@ void radio_update(uint32_t current_time_ms)
 {
     if (!s_hspi) return;
 
-    /* Kiểm tra gói tin mới qua thanh ghi STATUS */
-    uint8_t status = nrf_read_reg(NRF_REG_STATUS);
-
-    if (status & 0x40) { /* RX_DR bit */
+    /* Kiểm tra và đọc hết các gói tin có trong RX FIFO (tránh tràn/nghẽn FIFO) */
+    while (!(nrf_read_reg(NRF_REG_FIFO_STATUS) & 0x01)) { /* Bit 0: RX_EMPTY (0 = có dữ liệu) */
         RadioPacket_t packet;
         nrf_read_buf(NRF_CMD_R_RX_PAYLOAD, (uint8_t*)&packet, sizeof(RadioPacket_t));
-
-        /* Xóa cờ RX_DR */
-        nrf_write_reg(NRF_REG_STATUS, 0x40);
 
         /* Kiểm tra tính toàn vẹn của gói tin */
         if (packet.magic == PROTOCOL_MAGIC_BYTE && packet.version == PROTOCOL_VERSION) {
@@ -213,6 +209,9 @@ void radio_update(uint32_t current_time_ms)
             }
         }
     }
+
+    /* Xóa cờ ngắt RX_DR (và cả TX_DS, MAX_RT nếu có) */
+    nrf_write_reg(NRF_REG_STATUS, 0x70);
 
     /* Kiểm tra timeout mất sóng */
     if (s_connected && ((current_time_ms - s_last_packet_ms) > RADIO_TIMEOUT_MS)) {
