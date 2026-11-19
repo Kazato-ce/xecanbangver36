@@ -32,14 +32,15 @@
 #define MAX_TARGET_ANGLE_DEG        12.0f         /* Góc nghiêng tối đa khi di chuyển (tương đương BalancingWii) */
 
 /* ====================================================================
- * Safety & Thresholds (Tối ưu cho Cân Bằng Thực Tế Khi Đặt Xuống Đất)
+ * Safety & Thresholds (Tự động ARM khi giữ ở góc cân bằng 5s)
  * ==================================================================== */
-#define AUTO_BALANCE_ON_GROUND      0             /* 0: Khoi dong o che do DISARM an toan (PA0=HIGH), khong tu quay banh khi cam USB. Gui 'ARM' de chay */
-#define AUTO_ARM_STABLE_TICKS       200           /* Neu bat AUTO_ARM: Can giu thang 200 chu ky (1.0 giay) tren san moi bat can bang */
-#define AUTO_RECOVER_TICKS          100           /* Khi nga dung lai 500 ms -> Ve DISARMED */
+#define AUTO_BALANCE_ON_GROUND      1             /* 1: Bật tự động ARM khi đặt xe ở góc cân bằng */
+#define AUTO_ARM_HOLD_TIME_S        5.0f          /* Giữ xe ở góc cân bằng 5 giây -> TỰ ĐỘNG CHUYỂN SANG ARM */
+#define AUTO_ARM_STABLE_TICKS       ((uint32_t)(AUTO_ARM_HOLD_TIME_S * CONTROL_LOOP_FREQ_HZ)) /* 5s * 200Hz = 1000 chu kỳ */
+#define AUTO_RECOVER_TICKS          100           /* Khi ngã, dựng lại 500 ms -> Tự động về DISARMED */
 
-#define FALL_ANGLE_THRESHOLD_DEG    32.0f         /* Góc nghiêng > 32 độ -> NGÃ -> TẮT ĐỘNG CƠ AN TOÀN */
-#define ARM_UPRIGHT_ANGLE_DEG       3.5f          /* Xe dựng thẳng trong khoảng ±3.5 độ để kích hoạt */
+#define FALL_ANGLE_THRESHOLD_DEG    35.0f         /* Góc nghiêng > 35 độ -> NGÃ -> TẮT ĐỘNG CƠ AN TOÀN */
+#define ARM_UPRIGHT_ANGLE_DEG       4.5f          /* Xe dựng thẳng trong khoảng ±4.5 độ quanh điểm cân bằng để kích hoạt */
 #define IMU_MAX_CONSECUTIVE_ERRORS  5             /* Lỗi đọc IMU liên tiếp tối đa -> FAULT */
 #define RADIO_TIMEOUT_MS            1000          /* Mất sóng NRF quá thời gian này */
 

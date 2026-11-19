@@ -34,5 +34,7 @@ void sm_get_motor_test_speeds(float *left_rpm, float *right_rpm);
 
 void sm_set_auto_arm(bool enable);
 bool sm_get_auto_arm(void);
+float sm_get_auto_arm_countdown_s(void);
+uint32_t sm_get_upright_stable_count(void);
 
 #endif /* STATE_MACHINE_H */

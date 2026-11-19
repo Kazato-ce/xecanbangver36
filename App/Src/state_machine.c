@@ -209,3 +209,16 @@ bool sm_get_auto_arm(void)
 {
     return s_auto_arm_enabled;
 }
+
+float sm_get_auto_arm_countdown_s(void)
+{
+    if (s_state != STATE_DISARMED) return 0.0f;
+    if (s_upright_stable_count >= AUTO_ARM_STABLE_TICKS) return 0.0f;
+    uint32_t rem = AUTO_ARM_STABLE_TICKS - s_upright_stable_count;
+    return (float)rem * CONTROL_DT_S;
+}
+
+uint32_t sm_get_upright_stable_count(void)
+{
+    return s_upright_stable_count;
+}
