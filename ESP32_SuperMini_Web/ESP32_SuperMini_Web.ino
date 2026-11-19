@@ -14,11 +14,13 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include "config.h"
 #include "web_index.h"
 
 WebServer server(80);
+DNSServer dnsServer;
 
 struct TelemetryData {
   float    pitch = 0.0f;
@@ -239,21 +241,31 @@ void setup() {
   Serial.printf("UART1 khoi tao: RX=GPIO%d, TX=GPIO%d @ %d baud\n",
                 STM32_RX_PIN, STM32_TX_PIN, STM32_BAUDRATE);
 
-  // Bật chế độ vừa phát WiFi AP vừa kết nối WiFi nhà STA
-  WiFi.mode(WIFI_AP_STA);
+  // Cấu hình rõ IP Access Point (192.168.4.1) để điện thoại nhận IP ngay lập tức
+  IPAddress local_ip(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
 
-  // Khởi động Access Point riêng
+  if (String(WIFI_STA_SSID) != "YOUR_WIFI_NAME" && String(WIFI_STA_SSID).length() > 0) {
+    WiFi.mode(WIFI_AP_STA);
+  } else {
+    WiFi.mode(WIFI_AP); // Thuần AP: Khởi động tức thì, không quét kênh, cực kỳ ổn định
+  }
+
+  WiFi.softAPConfig(local_ip, gateway, subnet);
   WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
-  Serial.printf("WiFi AP bat: SSID '%s' (Pass: '%s')\n", WIFI_AP_SSID, WIFI_AP_PASS);
-  Serial.print("Dia chi IP AP: http://");
-  Serial.println(WiFi.softAPIP());
+  Serial.printf("\n[WIFI AP] Đã phát sóng SSID: '%s' (Mật khẩu: '%s')\n", WIFI_AP_SSID, WIFI_AP_PASS);
+  Serial.printf("[WIFI AP] Địa chỉ IP Dashboard: http://192.168.4.1\n");
+
+  // Khởi động DNS Server cho Captive Portal (mọi tên miền/IP đều trỏ về dashboard)
+  dnsServer.start(53, "*", local_ip);
 
   // Kết nối WiFi nhà (nếu có cấu hình)
-  if (String(WIFI_STA_SSID) != "YOUR_WIFI_NAME") {
-    Serial.printf("Dang ket noi WiFi nha '%s'...\n", WIFI_STA_SSID);
+  if (String(WIFI_STA_SSID) != "YOUR_WIFI_NAME" && String(WIFI_STA_SSID).length() > 0) {
+    Serial.printf("Đang kết nối WiFi nhà '%s'...\n", WIFI_STA_SSID);
     WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 
-    int timeout = 16;
+    int timeout = 10;
     while (WiFi.status() != WL_CONNECTED && timeout > 0) {
       delay(500);
       Serial.print(".");
@@ -262,16 +274,16 @@ void setup() {
     Serial.println();
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("Da ket noi WiFi nha! Dia chi IP: http://");
+      Serial.print("Đã kết nối WiFi nhà! Địa chỉ IP: http://");
       Serial.println(WiFi.localIP());
     } else {
-      Serial.println("Khong ket noi duoc WiFi nha. Dung WiFi AP rieng cua xe!");
+      Serial.println("Không kết nối được WiFi nhà. Dùng WiFi AP riêng của xe: http://192.168.4.1");
     }
   }
 
   // Khởi tạo mDNS: http://robot.local
   if (MDNS.begin(MDNS_NAME)) {
-    Serial.printf("mDNS hoat dong: http://%s.local\n", MDNS_NAME);
+    Serial.printf("mDNS hoạt động: http://%s.local\n", MDNS_NAME);
   }
 
   // Cấu hình định tuyến HTTP Web Server
@@ -282,14 +294,25 @@ void setup() {
   server.on("/api/drive", HTTP_POST, handleDrive);
   server.on("/api/drive", HTTP_GET, handleDrive);
 
+  // Captive Portal (Tự động mở trang Dashboard khi điện thoại kết nối WiFi)
+  server.on("/generate_204", handleRoot);
+  server.on("/gen_204", handleRoot);
+  server.on("/hotspot-detect.html", handleRoot);
+  server.on("/canonical.html", handleRoot);
+  server.onNotFound([]() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
   server.begin();
-  Serial.println("Web Server da san sang! Mo trinh duyet truy cap IP hoac http://robot.local");
+  Serial.println("\n>>> [SẴN SÀNG] Mở trình duyệt điện thoại/máy tính gõ: http://192.168.4.1 <<<");
 }
 
 // ──────────────────────────────────────────────
 // LOOP
 // ──────────────────────────────────────────────
 void loop() {
+  dnsServer.processNextRequest();
   server.handleClient();
 
   // Đọc dữ liệu từ STM32 qua UART1

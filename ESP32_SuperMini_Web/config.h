@@ -11,6 +11,9 @@
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   #define STM32_RX_PIN       44    // ESP32-S3 Super Mini RX (nhận từ PA9)
   #define STM32_TX_PIN       43    // ESP32-S3 Super Mini TX (gửi sang PA10)
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+  #define STM32_RX_PIN       20    // ESP32-C3 Super Mini RX (chân RX / GPIO 20)
+  #define STM32_TX_PIN       21    // ESP32-C3 Super Mini TX (chân TX / GPIO 21)
 #else
   #define STM32_RX_PIN       16    // ESP32 DevKit / Super Mini thường RX
   #define STM32_TX_PIN       17    // ESP32 DevKit / Super Mini thường TX

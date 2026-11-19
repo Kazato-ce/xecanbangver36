@@ -20,7 +20,20 @@
 
 #include <SPI.h>
 #include <RF24.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include "protocol.h"
+#include "web_remote.h"
+
+// ──────────────────────────────────────────────
+// Cấu hình Điểm phát WiFi Web Remote
+// ──────────────────────────────────────────────
+#define WIFI_AP_SSID            "Robot_CanBang_AP"
+#define WIFI_AP_PASS            "12345678"
+
+static WebServer server(80);
+static DNSServer dnsServer;
 
 // ──────────────────────────────────────────────
 // Cấu hình chân phần cứng NRF24L01
@@ -63,6 +76,64 @@ static uint8_t  s_last_imu_err = 0;
 static int16_t s_current_drive = 0;   // -1000..1000
 static int16_t s_current_steer = 0;   // -1000..1000
 static ProtocolCmd_t s_pending_cmd = CMD_DISARM;
+static uint8_t s_consecutive_fails = 0;
+
+// ──────────────────────────────────────────────
+// Các Endpoint HTTP Web Remote
+// ──────────────────────────────────────────────
+void handleRoot() {
+  server.send_P(200, "text/html", PAGE_REMOTE);
+}
+
+void handleStatus() {
+  const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
+  bool link_ok = (s_consecutive_fails < 4);
+  char buf[200];
+  snprintf(buf, sizeof(buf),
+    "{\"seq\":%u,\"rf_ok\":%s,\"link_ok\":%s,\"drive\":%d,\"steer\":%d,\"cmd\":\"%s\"}",
+    s_seq, s_radio_ok ? "true" : "false", link_ok ? "true" : "false",
+    s_current_drive, s_current_steer, cmd_str);
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", buf);
+}
+
+void handleWebCmd() {
+  if (server.hasArg("action")) {
+    String act = server.arg("action");
+    if (act == "arm") {
+      s_pending_cmd = CMD_ARM;
+      Serial.println("[WEB REMOTE]: ARM");
+    } else if (act == "disarm") {
+      s_pending_cmd = CMD_DISARM;
+      s_current_drive = 0;
+      s_current_steer = 0;
+      Serial.println("[WEB REMOTE]: DISARM");
+    } else if (act == "estop") {
+      s_pending_cmd = CMD_ESTOP;
+      s_current_drive = 0;
+      s_current_steer = 0;
+      Serial.println("[WEB REMOTE]: ESTOP");
+    }
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Bad Request");
+  }
+}
+
+void handleWebDrive() {
+  if (server.hasArg("speed") && server.hasArg("steer")) {
+    int spd = server.arg("speed").toInt();
+    int str = server.arg("steer").toInt();
+    s_current_drive = constrain(spd, -1000, 1000);
+    s_current_steer = constrain(str, -1000, 1000);
+    s_pending_cmd = CMD_DRIVE;
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Missing args");
+  }
+}
 
 void printMenu(void) {
   Serial.println("\n==================================================");
@@ -170,6 +241,37 @@ void setup() {
 
     Serial.println("[OK] NRF24L01 ĐÃ SẴN SÀNG TRUYỀN TIN (Kênh 76 @ 1Mbps)!");
   }
+
+  // Khởi tạo WiFi Access Point & Web Remote Server
+  IPAddress local_ip(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+  dnsServer.start(53, "*", local_ip);
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/cmd", HTTP_POST, handleWebCmd);
+  server.on("/api/cmd", HTTP_GET, handleWebCmd);
+  server.on("/api/drive", HTTP_POST, handleWebDrive);
+  server.on("/api/drive", HTTP_GET, handleWebDrive);
+
+  // Captive Portal
+  server.on("/generate_204", handleRoot);
+  server.on("/gen_204", handleRoot);
+  server.on("/hotspot-detect.html", handleRoot);
+  server.on("/canonical.html", handleRoot);
+  server.onNotFound([]() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.begin();
+  Serial.printf("\n[WIFI AP] Đã phát sóng WiFi: '%s' (Mật khẩu: '%s')\n", WIFI_AP_SSID, WIFI_AP_PASS);
+  Serial.println("[WEB REMOTE] Mở trình duyệt điện thoại/máy tính gõ: http://192.168.4.1 để lái xe!\n");
 }
 
 static String s_serial_rx = "";
@@ -252,26 +354,20 @@ void handleSerialInput() {
   }
 }
 
-static uint8_t s_consecutive_fails = 0;
-
 void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
   handleSerialInput();
 
   uint32_t now = millis();
 
   if (!s_radio_ok) {
-    // Nếu NRF24 trên ESP32 bị lỏng dây hoặc mất nguồn: chớp cảnh báo và in nhắc nhở
+    // Nếu NRF24 trên ESP32 bị lỏng dây hoặc mất nguồn: in nhắc nhở định kỳ (không dùng delay dài gây đơ web)
     static uint32_t s_last_err_ms = 0;
-    if ((now - s_last_err_ms) >= 1500) {
+    if ((now - s_last_err_ms) >= 2000) {
       s_last_err_ms = now;
       Serial.println("[LỖI PHẦN CỨNG 🔴] ESP32 không nhận diện được module NRF24L01!");
       Serial.println("  -> Kiểm tra dây nối: 3.3V, GND, CE=4, CSN=5, SCK=18, MISO=19, MOSI=23");
-      for (int i = 0; i < 3; i++) {
-        digitalWrite(PIN_LED, HIGH);
-        delay(60);
-        digitalWrite(PIN_LED, LOW);
-        delay(60);
-      }
     }
     return;
   }

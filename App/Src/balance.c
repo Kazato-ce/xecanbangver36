@@ -19,8 +19,8 @@ static float s_kp_pos   = 0.002f;         /* Hệ số giữ vị trí đứng y
 
 static float s_kp_steer = PID_STEER_KP;   /* Hệ số bẻ lái (Steering) */
 
-static float s_target_offset_deg = 2.98f;  /* Góc trim cân bằng tự nhiên */
-static float s_target_pitch_deg  = 2.98f;  /* Góc nghiêng mục tiêu tức thời */
+static float s_target_offset_deg = 1.9f ; /* Góc trim cân bằng tự nhiên */
+static float s_target_pitch_deg  = 1.9f;  /* Góc nghiêng mục tiêu tức thời */
 
 /* Biến trạng thái nội bộ thuật toán BalancingWii */
 static float s_actual_averaged_speed = 0.0f; /* Tốc độ trung bình qua lọc thông thấp */
