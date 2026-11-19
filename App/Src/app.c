@@ -177,12 +177,12 @@ void app_timer_control_tick(void)
     sm_update(pitch, control_link_ok, arm_req, disarm_req, estop_req, imu_err);
 
     if (sm_get_state() == STATE_ARMED) {
-        /* Giảm tốc độ tiến nếu phát hiện vật cản phía trước */
-        if (cmd_drive > 0.0f && ultrasonic_is_obstacle_detected()) {
+        /* Giảm tốc độ tiến nếu cảm biến phía trước phát hiện vật cản thực tế (bỏ qua giá trị 0/ngắt kết nối) */
+        if (cmd_drive > 0.0f) {
             uint16_t dist_front = ultrasonic_get_dist_cm(US_FRONT);
-            if (dist_front < OBSTACLE_STOP_DIST_CM) {
+            if (dist_front >= 2 && dist_front < OBSTACLE_STOP_DIST_CM) {
                 cmd_drive = 0.0f;
-            } else if (dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
+            } else if (dist_front >= 2 && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
                 cmd_drive *= 0.5f;
             }
         }

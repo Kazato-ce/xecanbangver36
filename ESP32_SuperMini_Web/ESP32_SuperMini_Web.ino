@@ -4,12 +4,16 @@
  *        - Đọc dữ liệu Telemetry từ STM32F405 (PA9 TX, PA10 RX) qua UART
  *        - Phát Web Server trên mạng WiFi AP (192.168.4.1) và WiFi STA mạng nhà
  *        - Dashboard hiển thị góc nghiêng thời gian thực, đồ thị Canvas, vật cản, pin
- *        - Tinh chỉnh thông số PID trực tiếp từ trình duyệt Web và gửi sang STM32
+ *        - Tinh chỉnh thông số PID và điều khiển tiến/lùi/rẽ trực tiếp từ trình duyệt Web
  *
- * Sơ đồ đấu dây:
+ * Sơ đồ đấu dây chuẩn:
  *   STM32F405 PA9  (TX)  ----->  ESP32 RXD (Mặc định GPIO 44 trên ESP32-S3, GPIO 16 trên ESP32 thường)
  *   STM32F405 PA10 (RX)  <-----  ESP32 TXD (Mặc định GPIO 43 trên ESP32-S3, GPIO 17 trên ESP32 thường)
  *   STM32F405 GND        <=====> ESP32 GND (BẮT BUỘC NỐI CHUNG MASS GND)
+ *
+ * LƯU Ý KHI NẠP TRÊN ARDUINO IDE CHO ESP32-S3:
+ *   - Tools -> USB CDC On Boot: Enabled (để cổng USB-C nhận Serial Monitor trên máy tính)
+ *   - Nếu tắt CDC on boot, code tự động ngắt in debug ra chân 43/44 để không gây nhiễu cho STM32.
  */
 
 #include <WiFi.h>
@@ -21,6 +25,20 @@
 
 WebServer server(80);
 DNSServer dnsServer;
+
+// Cổng UART giao tiếp riêng biệt với STM32F405
+HardwareSerial StmSerial(1);
+
+// Debug Serial an toàn (chỉ in khi USB CDC bật, tuyệt đối không in ra chân STM32)
+#if ARDUINO_USB_CDC_ON_BOOT
+  #define DBG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+  #define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
+  #define DBG_PRINT(...)   Serial.print(__VA_ARGS__)
+#else
+  #define DBG_PRINTF(...)  do {} while(0)
+  #define DBG_PRINTLN(...) do {} while(0)
+  #define DBG_PRINT(...)   do {} while(0)
+#endif
 
 struct TelemetryData {
   float    pitch = 0.0f;
@@ -47,15 +65,20 @@ struct TelemetryData {
 } telem;
 
 String rxBuffer = "";
+static uint32_t s_rx_bytes_total = 0;
+static uint8_t  s_current_rx_pin = STM32_RX_PIN;
+static uint8_t  s_current_tx_pin = STM32_TX_PIN;
+static bool     s_pin_locked = false;
+static uint32_t s_last_pin_swap_ms = 0;
 
 // ──────────────────────────────────────────────
 // Xử lý gói tin Telemetry nhận từ STM32
 // Hỗ trợ cả định dạng JSON lẫn định dạng $T,...
 // ──────────────────────────────────────────────
 void parseTelemetryFrame(const String& line) {
-  // 1. Nếu là định dạng JSON từ STM32:
+  // 1. Định dạng JSON từ STM32:
   // {"type":"telemetry","seq":...,"state":3,"pitch":1.25,"target":0.0,"rate":0.1,...}
-  if (line.indexOf("\"type\":\"telemetry\"") >= 0 || line.indexOf("\"type\": \"telemetry\"") >= 0) {
+  if (line.indexOf("\"pitch\":") >= 0) {
     int p_pitch  = line.indexOf("\"pitch\":");
     int p_target = line.indexOf("\"target\":");
     int p_rate   = line.indexOf("\"rate\":");
@@ -94,7 +117,7 @@ void parseTelemetryFrame(const String& line) {
     return;
   }
 
-  // 2. Nếu là định dạng CSV $T,pitch,rate,target,rpm_l,rpm_r,state,kp,kd,ki
+  // 2. Định dạng CSV $T,pitch,rate,target,rpm_l,rpm_r,state,kp,kd,ki
   if (line.startsWith("$T,")) {
     int startIdx = 3;
     int fieldIndex = 0;
@@ -129,27 +152,26 @@ void parseTelemetryFrame(const String& line) {
 // Gửi lệnh PID sang STM32
 // ──────────────────────────────────────────────
 void sendPidToStm32(float kp, float kd, float ki, float target) {
-  // Gửi cả định dạng Text lẫn JSON để STM32 nhận ngay lập tức
   char cmd[128];
   snprintf(cmd, sizeof(cmd), "SET_PID %.2f %.2f %.2f\r\n", kp, kd, ki);
-  Serial1.print(cmd);
+  StmSerial.print(cmd);
 
   snprintf(cmd, sizeof(cmd), "{\"type\":\"set_pid\",\"seq\":1,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"target\":%.2f}\r\n",
            kp, kd, ki, target);
-  Serial1.print(cmd);
+  StmSerial.print(cmd);
 
-  Serial.printf("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.2f, target=%.2f\n", kp, kd, ki, target);
+  DBG_PRINTF("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.2f, target=%.2f\n", kp, kd, ki, target);
 }
 
 void sendCmdToStm32(const String& act) {
   if (act == "arm") {
-    Serial1.print("ARM\r\n");
-    Serial1.print("{\"type\":\"command\",\"action\":\"arm_request\"}\r\n");
-    Serial.println("[TX to STM32]: ARM");
+    StmSerial.print("ARM\r\n");
+    StmSerial.print("{\"type\":\"command\",\"action\":\"arm_request\"}\r\n");
+    DBG_PRINTLN("[TX to STM32]: ARM");
   } else if (act == "disarm") {
-    Serial1.print("DISARM\r\n");
-    Serial1.print("{\"type\":\"command\",\"action\":\"disarm\"}\r\n");
-    Serial.println("[TX to STM32]: DISARM");
+    StmSerial.print("DISARM\r\n");
+    StmSerial.print("{\"type\":\"command\",\"action\":\"disarm\"}\r\n");
+    DBG_PRINTLN("[TX to STM32]: DISARM");
   }
 }
 
@@ -215,12 +237,12 @@ void handleDrive() {
   float spd = server.hasArg("speed") ? server.arg("speed").toFloat() : 0.0f;
   float str = server.hasArg("steer") ? server.arg("steer").toFloat() : 0.0f;
 
-  char cmd[80];
+  char cmd[96];
   snprintf(cmd, sizeof(cmd), "DRIVE %.2f %.2f\r\n", spd, str);
-  Serial1.print(cmd);
+  StmSerial.print(cmd);
 
   snprintf(cmd, sizeof(cmd), "{\"type\":\"command\",\"action\":\"drive\",\"speed\":%.2f,\"steer\":%.2f}\r\n", spd, str);
-  Serial1.print(cmd);
+  StmSerial.print(cmd);
 
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "text/plain", "OK");
@@ -230,8 +252,10 @@ void handleDrive() {
 // SETUP
 // ──────────────────────────────────────────────
 void setup() {
+  #if ARDUINO_USB_CDC_ON_BOOT
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
+  #endif
 
   #ifdef PIN_LED
   pinMode(PIN_LED, OUTPUT);
@@ -244,20 +268,16 @@ void setup() {
   }
   #endif
 
-  Serial.println("\n==============================================");
-  Serial.println("  ESP32-S3 Super Mini - Robot Web Dashboard & PID");
-  Serial.println("==============================================");
+  DBG_PRINTLN("\n==============================================");
+  DBG_PRINTLN("  ESP32-S3 Super Mini - Robot Web Dashboard & PID");
+  DBG_PRINTLN("==============================================");
 
-  #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ESP32S3)
-  Serial0.end(); // Giải phóng chân GPIO 43/44 nếu UART0 mặc định đang gán
-  #endif
+  // Khởi tạo UART giao tiếp với STM32 (PA9 TX, PA10 RX)
+  StmSerial.begin(STM32_BAUDRATE, SERIAL_8N1, s_current_rx_pin, s_current_tx_pin);
+  DBG_PRINTF("UART STM32: RX=GPIO%d, TX=GPIO%d @ %d baud\n",
+             s_current_rx_pin, s_current_tx_pin, STM32_BAUDRATE);
 
-  // Khởi tạo UART1 nối với STM32 (PA9 TX, PA10 RX)
-  Serial1.begin(STM32_BAUDRATE, SERIAL_8N1, STM32_RX_PIN, STM32_TX_PIN);
-  Serial.printf("UART1 khoi tao: RX=GPIO%d, TX=GPIO%d @ %d baud\n",
-                STM32_RX_PIN, STM32_TX_PIN, STM32_BAUDRATE);
-
-  // Cấu hình rõ IP Access Point (192.168.4.1) để điện thoại nhận IP ngay lập tức
+  // Cấu hình IP Access Point (192.168.4.1) để điện thoại nhận IP tức thì
   IPAddress local_ip(192, 168, 4, 1);
   IPAddress gateway(192, 168, 4, 1);
   IPAddress subnet(255, 255, 255, 0);
@@ -270,36 +290,36 @@ void setup() {
 
   WiFi.softAPConfig(local_ip, gateway, subnet);
   WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
-  Serial.printf("\n[WIFI AP] Đã phát sóng SSID: '%s' (Mật khẩu: '%s')\n", WIFI_AP_SSID, WIFI_AP_PASS);
-  Serial.printf("[WIFI AP] Địa chỉ IP Dashboard: http://192.168.4.1\n");
+  DBG_PRINTF("\n[WIFI AP] Đã phát sóng SSID: '%s' (Mật khẩu: '%s')\n", WIFI_AP_SSID, WIFI_AP_PASS);
+  DBG_PRINTF("[WIFI AP] Địa chỉ IP Dashboard: http://192.168.4.1\n");
 
-  // Khởi động DNS Server cho Captive Portal (mọi tên miền/IP đều trỏ về dashboard)
+  // Khởi động DNS Server cho Captive Portal
   dnsServer.start(53, "*", local_ip);
 
   // Kết nối WiFi nhà (nếu có cấu hình)
   if (String(WIFI_STA_SSID) != "YOUR_WIFI_NAME" && String(WIFI_STA_SSID).length() > 0) {
-    Serial.printf("Đang kết nối WiFi nhà '%s'...\n", WIFI_STA_SSID);
+    DBG_PRINTF("Đang kết nối WiFi nhà '%s'...\n", WIFI_STA_SSID);
     WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 
     int timeout = 10;
     while (WiFi.status() != WL_CONNECTED && timeout > 0) {
       delay(500);
-      Serial.print(".");
+      DBG_PRINT(".");
       timeout--;
     }
-    Serial.println();
+    DBG_PRINTLN();
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("Đã kết nối WiFi nhà! Địa chỉ IP: http://");
-      Serial.println(WiFi.localIP());
+      DBG_PRINT("Đã kết nối WiFi nhà! Địa chỉ IP: http://");
+      DBG_PRINTLN(WiFi.localIP());
     } else {
-      Serial.println("Không kết nối được WiFi nhà. Dùng WiFi AP riêng của xe: http://192.168.4.1");
+      DBG_PRINTLN("Không kết nối được WiFi nhà. Dùng WiFi AP riêng của xe: http://192.168.4.1");
     }
   }
 
   // Khởi tạo mDNS: http://robot.local
   if (MDNS.begin(MDNS_NAME)) {
-    Serial.printf("mDNS hoạt động: http://%s.local\n", MDNS_NAME);
+    DBG_PRINTF("mDNS hoạt động: http://%s.local\n", MDNS_NAME);
   }
 
   // Cấu hình định tuyến HTTP Web Server
@@ -321,7 +341,7 @@ void setup() {
   });
 
   server.begin();
-  Serial.println("\n>>> [SẴN SÀNG] Mở trình duyệt điện thoại/máy tính gõ: http://192.168.4.1 <<<");
+  DBG_PRINTLN("\n>>> [SẴN SÀNG] Mở trình duyệt gõ: http://192.168.4.1 <<<");
 }
 
 // ──────────────────────────────────────────────
@@ -332,17 +352,16 @@ void loop() {
   server.handleClient();
 
   #ifdef PIN_LED
-  // Nếu nhận được dữ liệu từ STM32 (PA9) trong 500ms -> Bật đèn LED sáng liên tục
+  // Nếu nhận được dữ liệu từ STM32 trong 500ms -> Bật đèn LED sáng liên tục
   bool stm_alive = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 500));
   digitalWrite(PIN_LED, stm_alive ? HIGH : LOW);
   #endif
 
-  static uint32_t s_rx_bytes_total = 0;
   static uint32_t s_last_diag_ms = 0;
 
-  // Đọc dữ liệu từ STM32 qua UART1
-  while (Serial1.available() > 0) {
-    char c = (char)Serial1.read();
+  // Đọc dữ liệu từ STM32 qua StmSerial
+  while (StmSerial.available() > 0) {
+    char c = (char)StmSerial.read();
     s_rx_bytes_total++;
     if (c == '\n' || c == '\r') {
       if (rxBuffer.length() > 0) {
@@ -358,14 +377,33 @@ void loop() {
   }
 
   uint32_t now = millis();
+
+  // Cơ chế AUTO-SWAP PIN thông minh:
+  // Nếu sau 3.5 giây không nhận được byte nào từ STM32, tự động hoán đổi chân RX và TX
+  // Giúp nhận tín hiệu tức thì dù người dùng cắm PA9 vào RX(44) hay TX(43)!
+  if (s_rx_bytes_total > 50) {
+    s_pin_locked = true;
+  } else if (!s_pin_locked && (now - s_last_pin_swap_ms >= 3500)) {
+    s_last_pin_swap_ms = now;
+    if (s_rx_bytes_total == 0) {
+      uint8_t tmp = s_current_rx_pin;
+      s_current_rx_pin = s_current_tx_pin;
+      s_current_tx_pin = tmp;
+      StmSerial.end();
+      delay(20);
+      StmSerial.begin(STM32_BAUDRATE, SERIAL_8N1, s_current_rx_pin, s_current_tx_pin);
+      DBG_PRINTF("[UART AUTO-SWAP] Thử hoán đổi chân: RX=GPIO%d, TX=GPIO%d\n", s_current_rx_pin, s_current_tx_pin);
+    }
+  }
+
   if (now - s_last_diag_ms >= 1500) {
     s_last_diag_ms = now;
     if (telem.last_rx_ms > 0 && (now - telem.last_rx_ms < 2000)) {
-      Serial.printf("[STM32 KẾT NỐI TỐT 🟢] Đã nhận %u bytes | Góc Pitch: %.2f° | Trạng thái: %d\n",
-                    s_rx_bytes_total, telem.pitch, telem.state);
+      DBG_PRINTF("[STM32 KẾT NỐI TỐT 🟢] Đã nhận %u bytes | Pitch: %.2f° | Rate: %.2f°/s | State: %d\n",
+                 s_rx_bytes_total, telem.pitch, telem.rate, telem.state);
     } else {
-      Serial.printf("[CHỜ STM32 ⏳] Chưa nhận được gói tin (Tổng nhận: %u bytes). Kiểm tra dây PA9 -> RX(44) và GND!\n",
-                    s_rx_bytes_total);
+      DBG_PRINTF("[CHỜ STM32 ⏳] Chưa nhận được gói tin (Tổng nhận: %u bytes). RX=GPIO%d, TX=GPIO%d\n",
+                 s_rx_bytes_total, s_current_rx_pin, s_current_tx_pin);
     }
   }
 }

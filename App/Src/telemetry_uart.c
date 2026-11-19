@@ -52,6 +52,13 @@ static void usart1_gpio_init(void)
     HAL_GPIO_Init(GPIOA, &gpio);
 }
 
+void HAL_UART_MspInit(UART_HandleTypeDef* huart)
+{
+    if (huart->Instance == USART1) {
+        usart1_gpio_init();
+    }
+}
+
 void telemetry_uart_init(void)
 {
     usart1_gpio_init();
@@ -281,7 +288,7 @@ static void send_telemetry(void)
 
     bool mpu_ok = imu_is_calibrated() && (imu_get_error_count() == 0);
     uint32_t imu_err = imu_get_error_count();
-    bool nrf_ok = radio_check_hardware(NULL, NULL, NULL);
+    bool nrf_ok = radio_is_connected();
     bool spm_ok = telemetry_uart_is_supermini_linked();
     bool upright = (fabsf(pitch - balance_get_target_offset()) <= ARM_UPRIGHT_ANGLE_DEG);
     float arm_cd = sm_get_auto_arm_countdown_s();

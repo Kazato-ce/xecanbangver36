@@ -134,13 +134,18 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
         s_position_error = 0.0f;
     }
 
-    /* 4. Vòng ngoài PI Vận Tốc: Tính góc nghiêng mục tiêu (Target Pitch) */
+    /* 4. Vòng ngoài PI Vận Tốc & Tạo Góc Nghiêng Di Chuyển (Drive Pitch Tilt):
+     * Xe 2 bánh tự cân bằng muốn tiến/lùi phải nghiêng người theo hướng đó.
+     * cmd_drive (-1.0 .. +1.0) chủ động tạo góc nghiêng drive_tilt để xe lướt đi */
+    float drive_tilt = cmd_drive * 5.5f;
+
     float speed_err = target_speed - s_actual_averaged_speed - (s_position_error * s_kp_pos);
 
     s_speed_error_i += speed_err * dt_s;
     s_speed_error_i = clampf(s_speed_error_i, -8000.0f, 8000.0f);
 
     float target_pitch = s_target_offset_deg
+                       + drive_tilt
                        + (s_kp_speed * 0.001f * speed_err)
                        + (s_ki_speed * 0.001f * s_speed_error_i);
     target_pitch = clampf(target_pitch, -MAX_TARGET_ANGLE_DEG, MAX_TARGET_ANGLE_DEG);
@@ -182,7 +187,9 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
         dyn_k = 0.0f;
     }
 
-    float output_speed = s_speed * dyn_k;
+    /* Trộn thành phần ga đẩy dứt khoát khi có lệnh tiến/lùi */
+    float drive_throttle = cmd_drive * (float)STEP_CRUISE_MAX_HZ * 0.35f;
+    float output_speed = (s_speed * dyn_k) + drive_throttle;
 
     /* 7. Bộ trộn rẽ (Steering Mixer) & Chống bão hòa (Anti-saturation):
      * Cắt giảm tốc độ tuyến tính nếu tổng tốc độ và rẽ vượt quá giới hạn xung tối đa */

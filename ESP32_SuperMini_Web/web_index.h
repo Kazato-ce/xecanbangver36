@@ -203,12 +203,12 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px;">
         <div class="field">
-          <label>Tốc độ đặt (Drive): <span id="lblDriveSpd">150</span></label>
-          <input type="range" id="rngDriveSpd" min="50" max="400" step="10" value="150" oninput="document.getElementById('lblDriveSpd').innerText=this.value">
+          <label>Tốc độ đặt (Drive): <span id="lblDriveSpd">500 (50%)</span></label>
+          <input type="range" id="rngDriveSpd" min="100" max="1000" step="50" value="500" oninput="document.getElementById('lblDriveSpd').innerText=this.value+' ('+Math.round(this.value/10)+'%)'">
         </div>
         <div class="field">
-          <label>Độ nhạy rẽ (Steer): <span id="lblSteerSpd">200</span></label>
-          <input type="range" id="rngSteerSpd" min="50" max="400" step="10" value="200" oninput="document.getElementById('lblSteerSpd').innerText=this.value">
+          <label>Độ nhạy rẽ (Steer): <span id="lblSteerSpd">300 (30%)</span></label>
+          <input type="range" id="rngSteerSpd" min="100" max="600" step="50" value="300" oninput="document.getElementById('lblSteerSpd').innerText=this.value+' ('+Math.round(this.value/10)+'%)'">
         </div>
       </div>
     </div>
@@ -359,14 +359,16 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     const historyPitch = new Array(maxPoints).fill(0);
     const historyTarget = new Array(maxPoints).fill(0);
 
-    function resizeCanvas() {
-      canvas.width = canvas.parentElement.clientWidth;
-      canvas.height = canvas.parentElement.clientHeight;
-    }
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
-
     function drawChart() {
+      const container = canvas.parentElement;
+      const targetW = (container && container.clientWidth > 50) ? container.clientWidth : 600;
+      const targetH = (container && container.clientHeight > 50) ? container.clientHeight : 200;
+
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const w = canvas.width;
       const h = canvas.height;
@@ -380,7 +382,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       ctx.lineTo(w, midY);
       ctx.stroke();
 
-      // Helper to map angle [-30..+30] to Y [h..0]
+      // Helper to map angle [-25..+25] to Y [h..0]
       const scale = (midY - 10) / 25.0; // 25 degrees full scale
 
       // Draw Target line (Blue)
@@ -389,7 +391,8 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       ctx.beginPath();
       for (let i = 0; i < maxPoints; i++) {
         const x = (i / (maxPoints - 1)) * w;
-        const y = midY - (historyTarget[i] * scale);
+        const val = Number.isFinite(historyTarget[i]) ? historyTarget[i] : 0;
+        const y = midY - (val * scale);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -400,7 +403,8 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       ctx.beginPath();
       for (let i = 0; i < maxPoints; i++) {
         const x = (i / (maxPoints - 1)) * w;
-        const y = midY - (historyPitch[i] * scale);
+        const val = Number.isFinite(historyPitch[i]) ? historyPitch[i] : 0;
+        const y = midY - (val * scale);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -414,13 +418,22 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       fetch('/api/data')
         .then(r => r.json())
         .then(d => {
-          document.getElementById('valPitch').innerHTML = d.pitch.toFixed(2) + '<span class="val-unit">°</span>';
-          document.getElementById('valTarget').innerText = d.target.toFixed(2);
-          document.getElementById('valRate').innerHTML = d.rate.toFixed(1) + '<span class="val-unit">°/s</span>';
-          document.getElementById('valRpmL').innerText = Math.round(d.rpm_l);
-          document.getElementById('valRpmR').innerText = Math.round(d.rpm_r);
-          document.getElementById('valDistFront').innerHTML = (d.dist_f < 400 ? d.dist_f : '--') + '<span class="val-unit">cm</span>';
-          document.getElementById('valTof').innerText = (d.tof_mm < 8000 ? d.tof_mm : '--');
+          if (!d) return;
+          const pitch = (typeof d.pitch === 'number' && Number.isFinite(d.pitch)) ? d.pitch : 0.0;
+          const target = (typeof d.target === 'number' && Number.isFinite(d.target)) ? d.target : 0.0;
+          const rate = (typeof d.rate === 'number' && Number.isFinite(d.rate)) ? d.rate : 0.0;
+          const rpmL = (typeof d.rpm_l === 'number' && Number.isFinite(d.rpm_l)) ? d.rpm_l : 0.0;
+          const rpmR = (typeof d.rpm_r === 'number' && Number.isFinite(d.rpm_r)) ? d.rpm_r : 0.0;
+          const distF = (typeof d.dist_f === 'number') ? d.dist_f : 999;
+          const tof = (typeof d.tof_mm === 'number') ? d.tof_mm : 8190;
+
+          document.getElementById('valPitch').innerHTML = pitch.toFixed(2) + '<span class="val-unit">°</span>';
+          document.getElementById('valTarget').innerText = target.toFixed(2);
+          document.getElementById('valRate').innerHTML = rate.toFixed(1) + '<span class="val-unit">°/s</span>';
+          document.getElementById('valRpmL').innerText = Math.round(rpmL);
+          document.getElementById('valRpmR').innerText = Math.round(rpmR);
+          document.getElementById('valDistFront').innerHTML = (distF < 400 ? distF : '--') + '<span class="val-unit">cm</span>';
+          document.getElementById('valTof').innerText = (tof < 8000 ? tof : '--');
 
           const b = document.getElementById('badgeState');
           const st = d.state || 0;
@@ -469,7 +482,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
           const bUpr = document.getElementById('badgeUpright');
           if (d.upright) {
-            bUpr.innerText = "SẴN SÀNG ARM (±3.5°)";
+            bUpr.innerText = "SẴN SÀNG ARM (±8.0°)";
             bUpr.style.background = "var(--green)";
             bUpr.style.color = "#fff";
           } else {
@@ -480,9 +493,9 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
           // Update chart
           historyPitch.shift();
-          historyPitch.push(d.pitch);
+          historyPitch.push(pitch);
           historyTarget.shift();
-          historyTarget.push(d.target);
+          historyTarget.push(target);
           drawChart();
         })
         .catch(() => {});
