@@ -30,11 +30,11 @@ from PIL import Image, ImageTk
 
 # Import driver serial tùy biến (tương thích cả pyserial lẫn Windows ctypes gốc)
 try:
-    from tools.python_ground_station.serial_driver import SerialClient, list_com_ports
+    from tools.python_ground_station.serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
     from tools.python_ground_station.video_worker import VideoStreamWorker
 except ImportError:
-    # Nếu chạy trực tiếp từ thư mục tools/python_ground_station
-    from serial_driver import SerialClient, list_com_ports
+    # Nếu chạy trực tiếp từ thư mục App_python hoặc tools/python_ground_station
+    from serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
     from video_worker import VideoStreamWorker
 
 
@@ -70,6 +70,11 @@ class GroundStationApp:
         self.serial_client = None
         self.serial_thread = None
         self.serial_running = False
+        self.last_connected_port = None
+        self.auto_reconnect_var = tk.BooleanVar(value=True)
+        self.auto_reconnecting = False
+        self._last_reconnect_attempt_ms = 0
+        self._last_drive_tx_ms = 0
 
         # Trạng thái Video
         self.video_worker = None
@@ -348,7 +353,7 @@ class GroundStationApp:
     def _build_serial_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📡 Cổng Kết Nối ESP32 DevKit V1 (NRF24L01 Bridge) ",
+            text=" 📡 Cổng Kết Nối ESP32 DevKit V1 (NRF24L01 Bridge Dongle) ",
             font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
@@ -362,9 +367,9 @@ class GroundStationApp:
         row = tk.Frame(card, bg=THEME["card"])
         row.pack(fill=tk.X)
 
-        tk.Label(row, text="Cổng COM:", fg=THEME["text"], bg=THEME["card"]).pack(side=tk.LEFT)
+        tk.Label(row, text="Cổng COM:", font=("Segoe UI", 9, "bold"), fg=THEME["text"], bg=THEME["card"]).pack(side=tk.LEFT)
 
-        self.cb_com_ports = ttk.Combobox(row, width=12, state="readonly")
+        self.cb_com_ports = ttk.Combobox(row, width=22, state="readonly")
         self.cb_com_ports.pack(side=tk.LEFT, padx=6)
 
         btn_refresh = tk.Button(
@@ -373,13 +378,17 @@ class GroundStationApp:
         )
         btn_refresh.pack(side=tk.LEFT, padx=2)
 
-        tk.Label(row, text="Baud: 115200", fg=THEME["subtext"], bg=THEME["card"]).pack(side=tk.LEFT, padx=8)
+        btn_auto = tk.Button(
+            row, text="⚡ Tự Tìm & Nối", bg=THEME["primary"], fg="#11111b",
+            font=("Segoe UI", 8, "bold"), relief=tk.FLAT, padx=6, command=self.auto_connect_esp32
+        )
+        btn_auto.pack(side=tk.LEFT, padx=2)
 
         btn_ping = tk.Button(
-            row, text="⚡ Ping Sóng", bg=THEME["card_alt"], fg=THEME["text"],
-            relief=tk.FLAT, padx=8, command=self.ping_robot
+            row, text="📡 Ping", bg=THEME["card_alt"], fg=THEME["text"],
+            relief=tk.FLAT, padx=6, command=self.ping_robot
         )
-        btn_ping.pack(side=tk.LEFT, padx=4)
+        btn_ping.pack(side=tk.LEFT, padx=2)
 
         self.btn_connect = tk.Button(
             row,
@@ -388,7 +397,7 @@ class GroundStationApp:
             bg=THEME["success"],
             fg="#11111b",
             relief=tk.FLAT,
-            padx=14,
+            padx=12,
             pady=2,
             command=self.toggle_serial
         )
@@ -406,6 +415,19 @@ class GroundStationApp:
         )
         self.lbl_serial_badge.pack(side=tk.LEFT)
 
+        self.chk_auto_reconnect = tk.Checkbutton(
+            status_row,
+            text="Tự động nối lại",
+            variable=self.auto_reconnect_var,
+            font=("Segoe UI", 8),
+            fg=THEME["subtext"],
+            bg=THEME["card"],
+            selectcolor=THEME["card_alt"],
+            activebackground=THEME["card"],
+            activeforeground=THEME["text"]
+        )
+        self.chk_auto_reconnect.pack(side=tk.LEFT, padx=12)
+
         self.lbl_rf_link = tk.Label(
             status_row,
             text="● Sóng NRF: Chờ kết nối COM...",
@@ -419,60 +441,107 @@ class GroundStationApp:
         if not self.serial_running or not self.serial_client:
             self.log_console("[Ping] Chưa kết nối cổng COM của ESP32!", "WARN")
             return
-        self.send_command("PING")
+        self.send_serial_cmd("PING")
         self.log_console("[Ping] Đã gửi lệnh PING kiểm tra sóng sang ESP32 DevKit...", "INFO")
 
     def refresh_com_ports(self):
-        ports = list_com_ports()
-        self.cb_com_ports["values"] = ports
-        if ports:
-            self.cb_com_ports.current(0)
-        self.log_console(f"[Serial] Tìm thấy các cổng: {ports}", "INFO")
+        details = get_port_details()
+        labels = [d["label"] for d in details]
+        self.cb_com_ports["values"] = labels
+
+        best_idx = 0
+        for i, d in enumerate(details):
+            if d.get("is_esp"):
+                best_idx = i
+                break
+
+        if labels:
+            self.cb_com_ports.current(best_idx)
+        self.log_console(f"[Serial] Tìm thấy {len(details)} cổng COM. Tự chọn: {labels[best_idx] if labels else 'Không có'}", "INFO")
+
+    def auto_connect_esp32(self):
+        self.refresh_com_ports()
+        port = find_best_esp32_port()
+        if not port:
+            messagebox.showinfo("Tìm cổng COM", "Chưa tìm thấy cổng COM nào cắm vào máy tính!\nHãy cắm cáp USB nối ESP32 DevKit V1 với máy tính.")
+            return
+        self.log_console(f"[Auto-Connect] Đang tự động kết nối cổng: {port}...", "INFO")
+        self.connect_serial(target_port=port)
 
     def toggle_serial(self):
         if self.serial_running:
-            self.disconnect_serial()
+            self.disconnect_serial(is_unexpected=False)
         else:
             self.connect_serial()
 
-    def connect_serial(self):
-        port = self.cb_com_ports.get()
-        if not port:
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn cổng COM của ESP32 DevKit V1!")
-            return
+    def connect_serial(self, target_port=None):
+        if target_port is None:
+            selected = self.cb_com_ports.get().strip()
+            if not selected:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn cổng COM của ESP32 DevKit V1!")
+                return False
+            target_port = selected.split()[0].strip()
 
         try:
-            self.serial_client = SerialClient(port=port, baudrate=115200, timeout=0.1)
+            self.serial_client = SerialClient(port=target_port, baudrate=115200, timeout=0.1)
             self.serial_client.open()
             self.serial_running = True
+            self.last_connected_port = target_port
 
             self.btn_connect.config(text="NGẮT KẾT NỐI", bg=THEME["danger"], fg="#ffffff")
-            self.lbl_serial_badge.config(text=f"● Đã kết nối: {port} @ 115200", fg=THEME["success"])
-            self.log_console(f"[Serial] Đã mở cổng {port} thành công!", "SUCCESS")
+            self.lbl_serial_badge.config(text=f"● Đã kết nối: {target_port} @ 115200", fg=THEME["success"])
+            self.log_console(f"[Serial] Đã mở cổng {target_port} thành công! (DTR/RTS an toàn, độ trễ < 5ms)", "SUCCESS")
 
             # Bật luồng đọc dữ liệu nền
             self.serial_thread = threading.Thread(target=self._serial_reader_loop, daemon=True)
             self.serial_thread.start()
 
+            # Gửi PING kiểm tra sóng sau khi kết nối
+            self.root.after(300, self.ping_robot)
+            return True
+
         except Exception as e:
             self.serial_running = False
-            self.lbl_serial_badge.config(text=f"● Lỗi mở cổng {port}", fg=THEME["danger"])
+            self.lbl_serial_badge.config(text=f"● Lỗi mở cổng {target_port}", fg=THEME["danger"])
             self.log_console(f"[Serial Lỗi] {e}", "ERROR")
-            messagebox.showerror("Lỗi kết nối", f"Không thể mở cổng {port}:\n{e}")
+            if not getattr(self, 'auto_reconnecting', False):
+                messagebox.showerror("Lỗi kết nối", f"Không thể mở cổng {target_port}:\n{e}")
+            return False
 
-    def disconnect_serial(self):
+    def disconnect_serial(self, is_unexpected=False):
         self.serial_running = False
         if self.serial_client:
             self.serial_client.close()
             self.serial_client = None
 
         self.btn_connect.config(text="KẾT NỐI", bg=THEME["success"], fg="#11111b")
-        self.lbl_serial_badge.config(text="● Đã ngắt kết nối", fg=THEME["subtext"])
-        self.log_console("[Serial] Đã đóng cổng kết nối.", "WARN")
+        if is_unexpected:
+            self.lbl_serial_badge.config(text="● Mất kết nối USB (Đang chờ cắm lại...)", fg=THEME["warning"])
+            self.log_console("[Serial] Cổng USB bị ngắt đột ngột (rút cáp hoặc mất nguồn)!", "WARN")
+        else:
+            self.lbl_serial_badge.config(text="● Đã ngắt kết nối", fg=THEME["subtext"])
+            self.log_console("[Serial] Đã đóng cổng kết nối.", "WARN")
 
     def _serial_reader_loop(self):
         buffer = ""
         while self.serial_running and self.serial_client and self.serial_client.is_open:
+            try:
+                data = self.serial_client.read(256)
+                if data:
+                    text = data.decode("utf-8", errors="ignore")
+                    buffer += text
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            self.rx_count += 1
+                            self.root.after(0, self._process_rx_line, line)
+                else:
+                    time.sleep(0.005) # 5ms non-blocking polling
+            except Exception as e:
+                if self.serial_running:
+                    self.root.after(0, lambda: self.disconnect_serial(is_unexpected=True))
+                break
             try:
                 data = self.serial_client.read(128)
                 if data:
@@ -923,29 +992,36 @@ class GroundStationApp:
         self.steer_cmd = 0
         self.send_serial_cmd("ESTOP")
 
+    def _dispatch_drive(self):
+        now_ms = time.time() * 1000
+        if (now_ms - getattr(self, '_last_drive_tx_ms', 0)) >= 30: # Tối đa ~33 Hz tránh tràn buffer serial
+            self._last_drive_tx_ms = now_ms
+            self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+
     def cmd_fwd(self):
         step = int(self.slider_speed_step.get())
         self.drive_cmd = min(1000, self.drive_cmd + step)
-        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+        self._dispatch_drive()
 
     def cmd_bwd(self):
         step = int(self.slider_speed_step.get())
         self.drive_cmd = max(-1000, self.drive_cmd - step)
-        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+        self._dispatch_drive()
 
     def cmd_left(self):
         step = int(self.slider_steer_step.get())
         self.steer_cmd = max(-1000, self.steer_cmd - step)
-        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+        self._dispatch_drive()
 
     def cmd_right(self):
         step = int(self.slider_steer_step.get())
         self.steer_cmd = min(1000, self.steer_cmd + step)
-        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+        self._dispatch_drive()
 
     def cmd_stop(self):
         self.drive_cmd = 0
         self.steer_cmd = 0
+        self._last_drive_tx_ms = 0
         self.send_serial_cmd(" ")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1067,6 +1143,17 @@ class GroundStationApp:
 
         # 2. Cập nhật thống kê gói tin
         self.lbl_packets_stat.config(text=f"TX: {self.tx_count} | RX: {self.rx_count}")
+
+        # Tự động kết nối lại nếu bị rút cáp USB và cắm lại
+        if not self.serial_running and self.auto_reconnect_var.get() and getattr(self, 'last_connected_port', None):
+            now_ms = time.time() * 1000
+            if (now_ms - getattr(self, '_last_reconnect_attempt_ms', 0)) >= 2000:
+                self._last_reconnect_attempt_ms = now_ms
+                available = list_com_ports()
+                if self.last_connected_port in available:
+                    self.auto_reconnecting = True
+                    self.connect_serial(self.last_connected_port)
+                    self.auto_reconnecting = False
 
         # 3. Cập nhật khung hình Video (nếu có frame mới)
         if self.current_frame is not None:
