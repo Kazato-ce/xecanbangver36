@@ -3,8 +3,8 @@
  * @brief Firmware nạp bằng Arduino IDE cho ESP32-S3 Super Mini / ESP32 Super Mini:
  *        - Đọc dữ liệu Telemetry từ STM32F405 (PA9 TX, PA10 RX) qua UART
  *        - Phát Web Server trên mạng WiFi AP (192.168.4.1) và WiFi STA mạng nhà
- *        - Dashboard hiển thị góc nghiêng thời gian thực, đồ thị Canvas, vật cản, pin
- *        - Tinh chỉnh thông số PID và điều khiển tiến/lùi/rẽ trực tiếp từ trình duyệt Web
+ *        - Dashboard chuyên nghiệp: đọc góc nghiêng Pitch/Rate thời gian thực, đồ thị Canvas
+ *        - Hiển thị đầy đủ thông số PID hiện tại đang chạy trên STM32 và tinh chỉnh PID thời gian thực
  *
  * Sơ đồ đấu dây chuẩn:
  *   STM32F405 PA9  (TX)  ----->  ESP32 RXD (Mặc định GPIO 44 trên ESP32-S3, GPIO 16 trên ESP32 thường)
@@ -13,7 +13,6 @@
  *
  * LƯU Ý KHI NẠP TRÊN ARDUINO IDE CHO ESP32-S3:
  *   - Tools -> USB CDC On Boot: Enabled (để cổng USB-C nhận Serial Monitor trên máy tính)
- *   - Nếu tắt CDC on boot, code tự động ngắt in debug ra chân 43/44 để không gây nhiễu cho STM32.
  */
 
 #include <WiFi.h>
@@ -49,8 +48,12 @@ struct TelemetryData {
   int      state = 0;       // 0:BOOT, 1:CALIB, 2:DISARMED, 3:ARMED, 4:FAULT
   int      fault = 0;
   float    kp = 18.0f;
-  float    kd = 0.85f;
+  float    kd = 1.36f;
   float    ki = 0.0f;
+  float    kp_s = 0.35f;
+  float    ki_s = 0.02f;
+  float    steer = 1.20f;
+  float    trim = 0.45f;
   uint16_t dist_f = 999;
   uint16_t dist_l = 999;
   uint16_t dist_r = 999;
@@ -58,7 +61,8 @@ struct TelemetryData {
   float    bat = 14.8f;
   bool     mpu_ok = false;
   uint32_t imu_err = 0;
-  bool     nrf_ok = false;
+  bool     nrf_hw = false;
+  bool     nrf_link = false;
   bool     supermini_ok = false;
   bool     upright = false;
   uint32_t last_rx_ms = 0;
@@ -73,11 +77,8 @@ static uint32_t s_last_pin_swap_ms = 0;
 
 // ──────────────────────────────────────────────
 // Xử lý gói tin Telemetry nhận từ STM32
-// Hỗ trợ cả định dạng JSON lẫn định dạng $T,...
 // ──────────────────────────────────────────────
 void parseTelemetryFrame(const String& line) {
-  // 1. Định dạng JSON từ STM32:
-  // {"type":"telemetry","seq":...,"state":3,"pitch":1.25,"target":0.0,"rate":0.1,...}
   if (line.indexOf("\"pitch\":") >= 0) {
     int p_pitch  = line.indexOf("\"pitch\":");
     int p_target = line.indexOf("\"target\":");
@@ -88,11 +89,16 @@ void parseTelemetryFrame(const String& line) {
     int p_kp     = line.indexOf("\"kp\":");
     int p_kd     = line.indexOf("\"kd\":");
     int p_ki     = line.indexOf("\"ki\":");
+    int p_kps    = line.indexOf("\"kp_s\":");
+    int p_kis    = line.indexOf("\"ki_s\":");
+    int p_str    = line.indexOf("\"steer\":");
+    int p_trm    = line.indexOf("\"trim\":");
     int p_distf  = line.indexOf("\"dist_f\":");
     int p_tof    = line.indexOf("\"tof_mm\":");
     int p_mpu    = line.indexOf("\"mpu_ok\":");
     int p_imue   = line.indexOf("\"imu_err\":");
-    int p_nrf    = line.indexOf("\"nrf_ok\":");
+    int p_nrfhw  = line.indexOf("\"nrf_hw\":");
+    int p_nrflk  = line.indexOf("\"nrf_link\":");
     int p_spm    = line.indexOf("\"supermini_ok\":");
     int p_upr    = line.indexOf("\"upright\":");
 
@@ -105,62 +111,39 @@ void parseTelemetryFrame(const String& line) {
     if (p_kp >= 0)     telem.kp     = line.substring(p_kp + 5).toFloat();
     if (p_kd >= 0)     telem.kd     = line.substring(p_kd + 5).toFloat();
     if (p_ki >= 0)     telem.ki     = line.substring(p_ki + 5).toFloat();
+    if (p_kps >= 0)    telem.kp_s   = line.substring(p_kps + 7).toFloat();
+    if (p_kis >= 0)    telem.ki_s   = line.substring(p_kis + 7).toFloat();
+    if (p_str >= 0)    telem.steer  = line.substring(p_str + 8).toFloat();
+    if (p_trm >= 0)    telem.trim   = line.substring(p_trm + 7).toFloat();
     if (p_distf >= 0)  telem.dist_f = line.substring(p_distf + 9).toInt();
     if (p_tof >= 0)    telem.tof_mm = line.substring(p_tof + 9).toInt();
     if (p_mpu >= 0)    telem.mpu_ok = (line.substring(p_mpu + 9, p_mpu + 14).indexOf("true") >= 0);
     if (p_imue >= 0)   telem.imu_err = (uint32_t)line.substring(p_imue + 10).toInt();
-    if (p_nrf >= 0)    telem.nrf_ok = (line.substring(p_nrf + 9, p_nrf + 14).indexOf("true") >= 0);
+    if (p_nrfhw >= 0)  telem.nrf_hw = (line.substring(p_nrfhw + 9, p_nrfhw + 14).indexOf("true") >= 0);
+    if (p_nrflk >= 0)  telem.nrf_link = (line.substring(p_nrflk + 11, p_nrflk + 16).indexOf("true") >= 0);
     if (p_spm >= 0)    telem.supermini_ok = (line.substring(p_spm + 15, p_spm + 20).indexOf("true") >= 0);
     if (p_upr >= 0)    telem.upright = (line.substring(p_upr + 10, p_upr + 15).indexOf("true") >= 0);
 
     telem.last_rx_ms = millis();
     return;
   }
-
-  // 2. Định dạng CSV $T,pitch,rate,target,rpm_l,rpm_r,state,kp,kd,ki
-  if (line.startsWith("$T,")) {
-    int startIdx = 3;
-    int fieldIndex = 0;
-    String fields[12];
-
-    for (int i = 3; i < line.length(); i++) {
-      if (line[i] == ',' || line[i] == '\n' || line[i] == '\r') {
-        fields[fieldIndex++] = line.substring(startIdx, i);
-        startIdx = i + 1;
-        if (fieldIndex >= 11) break;
-      }
-    }
-
-    if (fieldIndex >= 7) {
-      telem.pitch  = fields[0].toFloat();
-      telem.rate   = fields[1].toFloat();
-      telem.target = fields[2].toFloat();
-      telem.rpm_l  = fields[3].toFloat();
-      telem.rpm_r  = fields[4].toFloat();
-      telem.state  = fields[5].toInt();
-      telem.kp     = fields[6].toFloat();
-      if (fieldIndex >= 9) {
-        telem.kd   = fields[7].toFloat();
-        telem.ki   = fields[8].toFloat();
-      }
-      telem.last_rx_ms = millis();
-    }
-  }
 }
 
 // ──────────────────────────────────────────────
 // Gửi lệnh PID sang STM32
 // ──────────────────────────────────────────────
-void sendPidToStm32(float kp, float kd, float ki, float target) {
-  char cmd[128];
-  snprintf(cmd, sizeof(cmd), "SET_PID %.2f %.2f %.2f\r\n", kp, kd, ki);
+void sendPidToStm32(float kp, float kd, float ki, float kp_s, float ki_s, float steer, float trim) {
+  char cmd[160];
+  snprintf(cmd, sizeof(cmd), "SET_PID %.2f %.2f %.2f %.2f %.2f %.2f\r\n", kp, kd, ki, kp_s, ki_s, steer);
   StmSerial.print(cmd);
 
-  snprintf(cmd, sizeof(cmd), "{\"type\":\"set_pid\",\"seq\":1,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"target\":%.2f}\r\n",
-           kp, kd, ki, target);
+  snprintf(cmd, sizeof(cmd),
+    "{\"type\":\"set_pid\",\"seq\":1,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f}\r\n",
+    kp, kd, ki, kp_s, ki_s, steer, trim);
   StmSerial.print(cmd);
 
-  DBG_PRINTF("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.2f, target=%.2f\n", kp, kd, ki, target);
+  DBG_PRINTF("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.2f, kp_s=%.2f, ki_s=%.2f, steer=%.2f, trim=%.2f\n",
+             kp, kd, ki, kp_s, ki_s, steer, trim);
 }
 
 void sendCmdToStm32(const String& act) {
@@ -184,21 +167,22 @@ void handleRoot() {
 
 void handleGetData() {
   bool stm_link = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 2000));
-  char json[420];
+  char json[512];
   snprintf(json, sizeof(json),
     "{\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
     "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"state\":%d,\"fault\":%d,"
-    "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,"
+    "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
     "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":%.1f,"
-    "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_ok\":%s,\"upright\":%s}",
+    "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_hw\":%s,\"nrf_link\":%s,\"upright\":%s}",
     telem.pitch, telem.target, telem.rate,
     telem.rpm_l, telem.rpm_r, telem.state, telem.fault,
-    telem.kp, telem.kd, telem.ki,
+    telem.kp, telem.kd, telem.ki, telem.kp_s, telem.ki_s, telem.steer, telem.trim,
     telem.dist_f, telem.dist_l, telem.dist_r, telem.tof_mm, telem.bat,
     stm_link ? "true" : "false",
     telem.mpu_ok ? "true" : "false",
     telem.imu_err,
-    telem.nrf_ok ? "true" : "false",
+    telem.nrf_hw ? "true" : "false",
+    telem.nrf_link ? "true" : "false",
     telem.upright ? "true" : "false"
   );
 
@@ -207,19 +191,18 @@ void handleGetData() {
 }
 
 void handleSetPid() {
-  if (server.hasArg("kp") && server.hasArg("kd")) {
-    float kp   = server.arg("kp").toFloat();
-    float kd   = server.arg("kd").toFloat();
-    float ki   = server.hasArg("ki") ? server.arg("ki").toFloat() : 0.0f;
-    float trim = server.hasArg("target") ? server.arg("target").toFloat() : 0.0f;
+  float kp    = server.hasArg("kp") ? server.arg("kp").toFloat() : telem.kp;
+  float kd    = server.hasArg("kd") ? server.arg("kd").toFloat() : telem.kd;
+  float ki    = server.hasArg("ki") ? server.arg("ki").toFloat() : telem.ki;
+  float kp_s  = server.hasArg("kp_s") ? server.arg("kp_s").toFloat() : telem.kp_s;
+  float ki_s  = server.hasArg("ki_s") ? server.arg("ki_s").toFloat() : telem.ki_s;
+  float steer = server.hasArg("steer") ? server.arg("steer").toFloat() : telem.steer;
+  float trim  = server.hasArg("trim") ? server.arg("trim").toFloat() : (server.hasArg("target") ? server.arg("target").toFloat() : telem.trim);
 
-    sendPidToStm32(kp, kd, ki, trim);
+  sendPidToStm32(kp, kd, ki, kp_s, ki_s, steer, trim);
 
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "text/plain", "OK");
-  } else {
-    server.send(400, "text/plain", "Bad Request: Missing parameters");
-  }
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "text/plain", "OK");
 }
 
 void handleCmd() {
@@ -233,21 +216,6 @@ void handleCmd() {
   }
 }
 
-void handleDrive() {
-  float spd = server.hasArg("speed") ? server.arg("speed").toFloat() : 0.0f;
-  float str = server.hasArg("steer") ? server.arg("steer").toFloat() : 0.0f;
-
-  char cmd[96];
-  snprintf(cmd, sizeof(cmd), "DRIVE %.2f %.2f\r\n", spd, str);
-  StmSerial.print(cmd);
-
-  snprintf(cmd, sizeof(cmd), "{\"type\":\"command\",\"action\":\"drive\",\"speed\":%.2f,\"steer\":%.2f}\r\n", spd, str);
-  StmSerial.print(cmd);
-
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.send(200, "text/plain", "OK");
-}
-
 // ──────────────────────────────────────────────
 // SETUP
 // ──────────────────────────────────────────────
@@ -259,7 +227,6 @@ void setup() {
 
   #ifdef PIN_LED
   pinMode(PIN_LED, OUTPUT);
-  // Chớp LED xác nhận khởi động
   for (int i = 0; i < 3; i++) {
     digitalWrite(PIN_LED, HIGH);
     delay(100);
@@ -326,11 +293,10 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleGetData);
   server.on("/api/set_pid", HTTP_POST, handleSetPid);
+  server.on("/api/set_pid", HTTP_GET, handleSetPid);
   server.on("/api/cmd", HTTP_POST, handleCmd);
-  server.on("/api/drive", HTTP_POST, handleDrive);
-  server.on("/api/drive", HTTP_GET, handleDrive);
 
-  // Captive Portal (Tự động mở trang Dashboard khi điện thoại kết nối WiFi)
+  // Captive Portal
   server.on("/generate_204", handleRoot);
   server.on("/gen_204", handleRoot);
   server.on("/hotspot-detect.html", handleRoot);
@@ -352,7 +318,6 @@ void loop() {
   server.handleClient();
 
   #ifdef PIN_LED
-  // Nếu nhận được dữ liệu từ STM32 trong 500ms -> Bật đèn LED sáng liên tục
   bool stm_alive = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 500));
   digitalWrite(PIN_LED, stm_alive ? HIGH : LOW);
   #endif
@@ -371,7 +336,7 @@ void loop() {
     } else {
       rxBuffer += c;
       if (rxBuffer.length() > 600) {
-        rxBuffer = ""; // Tránh tràn bộ nhớ
+        rxBuffer = "";
       }
     }
   }
@@ -380,7 +345,6 @@ void loop() {
 
   // Cơ chế AUTO-SWAP PIN thông minh:
   // Nếu sau 3.5 giây không nhận được byte nào từ STM32, tự động hoán đổi chân RX và TX
-  // Giúp nhận tín hiệu tức thì dù người dùng cắm PA9 vào RX(44) hay TX(43)!
   if (s_rx_bytes_total > 50) {
     s_pin_locked = true;
   } else if (!s_pin_locked && (now - s_last_pin_swap_ms >= 3500)) {

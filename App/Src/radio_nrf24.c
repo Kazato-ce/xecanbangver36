@@ -303,6 +303,14 @@ bool radio_is_connected(void)
     return s_connected;
 }
 
+bool radio_is_hardware_ok(void)
+{
+    if (!s_hspi || !s_initialized) return false;
+    uint8_t st = nrf_read_reg(NRF_REG_STATUS);
+    uint8_t ch = nrf_read_reg(NRF_REG_RF_CH);
+    return (st != 0x00 && st != 0xFF && ch == RADIO_CHANNEL);
+}
+
 bool radio_check_hardware(uint8_t *status, uint8_t *config, uint8_t *channel)
 {
     if (!s_hspi || !s_initialized) return false;

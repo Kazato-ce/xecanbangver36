@@ -26,15 +26,15 @@ static volatile bool s_data_ready_flag = false;
 static bool mpu_write_reg(uint8_t reg, uint8_t val)
 {
     if (!s_hi2c) return false;
-    HAL_StatusTypeDef status = HAL_I2C_Mem_Write(s_hi2c, MPU_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT, &val, 1, 10);
-    return (status == HAL_OK);
+    uint8_t buf[2] = { reg, val };
+    return (HAL_I2C_Master_Transmit(s_hi2c, MPU_I2C_ADDR, buf, 2, 20) == HAL_OK);
 }
 
 static bool mpu_read_bytes(uint8_t reg, uint8_t *data, uint16_t len)
 {
-    if (!s_hi2c) return false;
-    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(s_hi2c, MPU_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT, data, len, 10);
-    return (status == HAL_OK);
+    if (!s_hi2c || !data) return false;
+    if (HAL_I2C_Master_Transmit(s_hi2c, MPU_I2C_ADDR, &reg, 1, 20) != HAL_OK) return false;
+    return (HAL_I2C_Master_Receive(s_hi2c, MPU_I2C_ADDR, data, len, 50) == HAL_OK);
 }
 
 bool imu_init(I2C_HandleTypeDef *hi2c)
@@ -45,37 +45,52 @@ bool imu_init(I2C_HandleTypeDef *hi2c)
     s_pitch_deg = 0.0f;
     s_gyro_rate_dps = 0.0f;
 
+    /* 1. Kiểm tra WHO_AM_I (0x68 là default AD0=0, 0x69 là AD0=1, 0x70/0x72 là bản clone MPU6500) */
     uint8_t who_am_i = 0;
-    if (!mpu_read_bytes(MPU_REG_WHO_AM_I, &who_am_i, 1) || (who_am_i != 0x68 && who_am_i != 0x72 && who_am_i != 0x70)) {
+    if (!mpu_read_bytes(MPU_REG_WHO_AM_I, &who_am_i, 1) ||
+        (who_am_i != 0x68 && who_am_i != 0x69 && who_am_i != 0x70 && who_am_i != 0x72 && who_am_i != 0x98)) {
         s_consecutive_errors++;
         return false;
     }
 
-    /* Reset device */
+    /* 2. Reset device */
     mpu_write_reg(MPU_REG_PWR_MGMT_1, 0x80);
-    HAL_Delay(50);
+    HAL_Delay(100);
 
-    /* Wake up, select PLL with X-axis gyroscope reference */
+    /* 3. Đánh thức và chọn Clock Source PLL Gyro X */
     mpu_write_reg(MPU_REG_PWR_MGMT_1, 0x01);
-    HAL_Delay(10);
+    HAL_Delay(15);
 
-    /* Config DLPF: ~42 Hz bandwidth */
+    /* 4. Cấu hình Sample Rate Divider = 0 (1 kHz) */
+    mpu_write_reg(MPU_REG_SMPLRT_DIV, 0x00);
+
+    /* 5. Cấu hình DLPF: ~42 Hz bandwidth */
     mpu_write_reg(MPU_REG_CONFIG, 0x03);
 
-    /* Sample rate divider = 4 -> 1 kHz / (1 + 4) = 200 Hz */
-    mpu_write_reg(MPU_REG_SMPLRT_DIV, 0x04);
-
-    /* Gyro scale: ±500 deg/s (65.5 LSB/(deg/s)) */
+    /* 6. Gyro scale: ±500 deg/s (65.5 LSB/(deg/s)) */
     mpu_write_reg(MPU_REG_GYRO_CONFIG, 0x08);
 
-    /* Accel scale: ±2g (16384 LSB/g) */
-    mpu_write_reg(MPU_REG_ACCEL_CONFIG, 0x00);
+    /* 7. Accel scale: ±4g (8192 LSB/g) */
+    mpu_write_reg(MPU_REG_ACCEL_CONFIG, 0x08);
 
-    /* Interrupt pin: Active High, Push-Pull, 50us pulse */
+    /* 8. Cấu hình chân ngắt INT (Active High, Push-Pull, 50us pulse) */
     mpu_write_reg(MPU_REG_INT_PIN_CFG, 0x00);
 
-    /* Enable Data Ready interrupt */
+    /* 9. Bật ngắt Data Ready */
     mpu_write_reg(MPU_REG_INT_ENABLE, 0x01);
+
+    /* 10. Đọc mẫu gia tốc khởi tạo góc ngay khi boot */
+    uint8_t raw[14];
+    if (mpu_read_bytes(MPU_REG_ACCEL_XOUT_H, raw, 14)) {
+        int16_t raw_ax = (int16_t)((raw[0] << 8) | raw[1]);
+        int16_t raw_ay = (int16_t)((raw[2] << 8) | raw[3]);
+        int16_t raw_az = (int16_t)((raw[4] << 8) | raw[5]);
+        float ax = (float)raw_ax / 8192.0f;
+        float ay = (float)raw_ay / 8192.0f;
+        float az = (float)raw_az / 8192.0f;
+        float acc_angle = (IMU_TILT_AXIS == 0) ? (atan2f(-ax, az) * 57.2957795f) : (atan2f(ay, az) * 57.2957795f);
+        s_pitch_deg = acc_angle * IMU_TILT_SIGN;
+    }
 
     return true;
 }
@@ -134,21 +149,21 @@ bool imu_read(float dt_s)
     int16_t raw_gx = (int16_t)((buf[8] << 8) | buf[9]);
     int16_t raw_gy = (int16_t)((buf[10] << 8) | buf[11]);
 
-    float ax = (float)raw_ax / 16384.0f;
-    float ay = (float)raw_ay / 16384.0f;
-    float az = (float)raw_az / 16384.0f;
+    float ax = (float)raw_ax / 8192.0f;
+    float ay = (float)raw_ay / 8192.0f;
+    float az = (float)raw_az / 8192.0f;
 
     float gyro_raw_dps;
     float acc_angle_deg;
 
     if (IMU_TILT_AXIS == 0) {
-        /* Pitch derived from ax and az, gyro from gy */
-        acc_angle_deg = atan2f(-ax, az) * (180.0f / 3.14159265f);
-        gyro_raw_dps = ((float)raw_gy / 65.5f) - s_gyro_bias;
+        /* Pitch từ ax và az, gyro từ gy */
+        acc_angle_deg = atan2f(-ax, az) * 57.2957795f;
+        gyro_raw_dps  = ((float)raw_gy / 65.5f) - s_gyro_bias;
     } else {
-        /* Pitch derived from ay and az, gyro from gx */
-        acc_angle_deg = atan2f(ay, az) * (180.0f / 3.14159265f);
-        gyro_raw_dps = ((float)raw_gx / 65.5f) - s_gyro_bias;
+        /* Pitch từ ay và az, gyro từ gx */
+        acc_angle_deg = atan2f(ay, az) * 57.2957795f;
+        gyro_raw_dps  = ((float)raw_gx / 65.5f) - s_gyro_bias;
     }
 
     acc_angle_deg *= IMU_TILT_SIGN;
@@ -181,33 +196,4 @@ bool imu_is_calibrated(void)
 uint32_t imu_get_error_count(void)
 {
     return s_consecutive_errors;
-}
-
-bool imu_diagnostics(uint8_t *out_who_am_i, float *out_bias, float *out_ax, float *out_ay, float *out_az, float *out_gx, float *out_gy, float *out_gz)
-{
-    if (!s_hi2c) return false;
-
-    uint8_t who = 0;
-    bool who_ok = mpu_read_bytes(MPU_REG_WHO_AM_I, &who, 1);
-    if (out_who_am_i) *out_who_am_i = who;
-    if (out_bias) *out_bias = s_gyro_bias;
-
-    uint8_t buf[14];
-    if (mpu_read_bytes(MPU_REG_ACCEL_XOUT_H, buf, 14)) {
-        int16_t raw_ax = (int16_t)((buf[0] << 8) | buf[1]);
-        int16_t raw_ay = (int16_t)((buf[2] << 8) | buf[3]);
-        int16_t raw_az = (int16_t)((buf[4] << 8) | buf[5]);
-        int16_t raw_gx = (int16_t)((buf[8] << 8) | buf[9]);
-        int16_t raw_gy = (int16_t)((buf[10] << 8) | buf[11]);
-        int16_t raw_gz = (int16_t)((buf[12] << 8) | buf[13]);
-
-        if (out_ax) *out_ax = (float)raw_ax / 16384.0f;
-        if (out_ay) *out_ay = (float)raw_ay / 16384.0f;
-        if (out_az) *out_az = (float)raw_az / 16384.0f;
-        if (out_gx) *out_gx = (float)raw_gx / 65.5f;
-        if (out_gy) *out_gy = (float)raw_gy / 65.5f;
-        if (out_gz) *out_gz = (float)raw_gz / 65.5f;
-        return who_ok && (who == 0x68 || who == 0x70 || who == 0x72);
-    }
-    return false;
 }

@@ -7,7 +7,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Robot Tự Cân Bằng - Dashboard & Realtime PID</title>
+  <title>Robot Cân Bằng 2 Bánh - PID Station & Monitor</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -20,7 +20,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       --green: #22c55e;
       --yellow: #eab308;
       --red: #ef4444;
-      --orange: #f97316;
+      --purple: #a855f7;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -33,68 +33,60 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       align-items: center;
       min-height: 100vh;
     }
-    .container { width: 100%; max-width: 920px; display: flex; flex-direction: column; gap: 14px; }
+    .container { width: 100%; max-width: 960px; display: flex; flex-direction: column; gap: 14px; }
     header {
       background: var(--card); border: 1px solid var(--border); border-radius: 12px;
       padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
     }
-    h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); }
+    h1 { font-size: 1.25rem; font-weight: 700; color: var(--accent); }
     .badge {
-      padding: 6px 14px; border-radius: 20px; font-size: 0.85rem; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 0.5px;
+      padding: 5px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px; display: inline-flex; align-items: center; gap: 4px;
     }
     .badge-boot { background: #475569; color: #fff; }
     .badge-calib { background: var(--yellow); color: #000; }
-    .badge-disarmed { background: var(--orange); color: #fff; }
+    .badge-disarmed { background: #f97316; color: #fff; }
     .badge-armed { background: var(--green); color: #fff; animation: pulse 1.5s infinite; }
     .badge-fault { background: var(--red); color: #fff; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
 
-    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
     .card {
       background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
     }
-    .card-title { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
-    .val-large { font-size: 1.8rem; font-weight: 700; }
+    .card-title { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; font-weight: 600; display: flex; justify-content: space-between; }
+    .val-large { font-size: 1.85rem; font-weight: 700; }
     .val-unit { font-size: 0.9rem; color: var(--muted); font-weight: 400; margin-left: 4px; }
 
     /* Canvas chart */
-    .chart-container { position: relative; width: 100%; height: 200px; background: #0b1120; border-radius: 8px; overflow: hidden; margin-top: 8px; }
+    .chart-container { position: relative; width: 100%; height: 210px; background: #0b1120; border-radius: 8px; overflow: hidden; margin-top: 8px; }
     canvas { width: 100%; height: 100%; display: block; }
 
-    /* Controls & PID */
+    /* Buttons */
     .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
     button {
-      flex: 1; min-width: 120px; padding: 12px 16px; border: none; border-radius: 8px;
+      flex: 1; min-width: 130px; padding: 12px 16px; border: none; border-radius: 8px;
       font-weight: 700; font-size: 0.95rem; cursor: pointer; transition: 0.2s;
     }
     .btn-arm { background: var(--green); color: #fff; }
     .btn-arm:hover { background: #16a34a; }
     .btn-disarm { background: var(--red); color: #fff; }
     .btn-disarm:hover { background: #dc2626; }
-    .btn-submit { background: var(--accent); color: #0f172a; width: 100%; margin-top: 10px; }
+    .btn-submit { background: var(--accent); color: #0f172a; }
     .btn-submit:hover { background: var(--accent-hover); }
+    .btn-secondary { background: #334155; color: #fff; }
+    .btn-secondary:hover { background: #475569; }
 
-    /* D-Pad Virtual Controller */
-    .dpad-container { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 12px 0; }
-    .dpad-row { display: flex; gap: 10px; justify-content: center; }
-    .btn-dpad {
-      width: 80px; height: 56px; border-radius: 8px; font-weight: 700; font-size: 1.05rem;
-      background: #334155; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      user-select: none; -webkit-user-select: none; cursor: pointer; transition: 0.15s;
-    }
-    .btn-dpad:active { background: var(--accent); color: #0f172a; transform: scale(0.96); }
-    .btn-dpad-stop { background: #475569; }
-    .btn-dpad-stop:active { background: var(--red); color: #fff; }
-
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 10px; }
-    .field { display: flex; flex-direction: column; gap: 4px; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; background: #0b1120; padding: 10px; border-radius: 8px; border: 1px solid #1e293b; }
     label { font-size: 0.85rem; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+    .field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
     input[type=number] {
-      background: #0b1120; border: 1px solid var(--border); border-radius: 6px;
-      color: #fff; padding: 8px 10px; font-size: 1rem; font-family: monospace;
+      width: 90px; background: #1e293b; border: 1px solid var(--border); border-radius: 6px;
+      color: #fff; padding: 6px 8px; font-size: 1rem; font-family: monospace; text-align: right;
     }
-    input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; margin-top: 2px; }
+    input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; }
 
     .toast {
       position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--accent);
@@ -105,10 +97,11 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <div class="container">
+    <!-- Header -->
     <header>
       <div>
         <h1>STM32F405 ↔ ESP32 Web Dashboard</h1>
-        <div style="font-size: 0.8rem; color: var(--muted);">Robot Xe Tự Cân Bằng 2 Bánh (TMC2208 + MPU6050)</div>
+        <div style="font-size: 0.8rem; color: var(--muted);">Trạm Đo Góc Nghiêng & Tinh Chỉnh Thông Số PID Thời Gian Thực</div>
       </div>
       <div style="display: flex; gap: 8px; align-items: center;">
         <span id="badgeState" class="badge badge-boot">BOOT</span>
@@ -117,138 +110,184 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     </header>
 
     <!-- Thanh Chẩn Đoán Phần Cứng Real-Time -->
-    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: center;">
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; align-items: center;">
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">STM32 UART:</span>
-        <span id="badgeStmLink" class="badge" style="background:var(--red); padding:3px 8px; font-size:0.75rem;">MẤT TÍN HIỆU</span>
+        <span id="badgeStmLink" class="badge" style="background:var(--red);">MẤT TÍN HIỆU</span>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">MPU6050:</span>
-        <span id="badgeMpu" class="badge" style="background:var(--muted); padding:3px 8px; font-size:0.75rem;">CHỜ TÍN HIỆU</span>
+        <span id="badgeMpu" class="badge" style="background:var(--muted);">CHỜ TÍN HIỆU</span>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">SÓNG NRF24:</span>
-        <span id="badgeNrf" class="badge" style="background:var(--muted); padding:3px 8px; font-size:0.75rem;">CHỜ TÍN HIỆU</span>
+        <span id="badgeNrf" class="badge" style="background:var(--muted);">CHỜ TÍN HIỆU</span>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">TƯ THẾ XE:</span>
-        <span id="badgeUpright" class="badge" style="background:var(--yellow); color:#000; padding:3px 8px; font-size:0.75rem;">NGHIÊNG</span>
+        <span id="badgeUpright" class="badge" style="background:var(--yellow); color:#000;">NGHIÊNG</span>
       </div>
     </div>
 
-    <!-- Hàng thông số chính -->
+    <!-- Hàng thẻ thông số đo góc & tốc độ thời gian thực -->
     <div class="grid-4">
       <div class="card">
         <div class="card-title">Góc Nghiêng Pitch</div>
-        <div class="val-large" id="valPitch">0.00<span class="val-unit">°</span></div>
-        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Góc đặt: <span id="valTarget">0.00</span>°</div>
+        <div class="val-large" id="valPitch" style="color:var(--accent);">0.00<span class="val-unit">°</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Điểm đặt mục tiêu: <span id="valTarget">0.00</span>°</div>
       </div>
       <div class="card">
         <div class="card-title">Tốc Độ Góc Gyro</div>
-        <div class="val-large" id="valRate">0.0<span class="val-unit">°/s</span></div>
-        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Trục cân bằng: X</div>
+        <div class="val-large" id="valRate" style="color:var(--yellow);">0.0<span class="val-unit">°/s</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Trục cân bằng X (Lọc bù 42Hz)</div>
       </div>
       <div class="card">
         <div class="card-title">Tốc Độ Bánh Xe (RPM)</div>
         <div class="val-large"><span id="valRpmL">0</span> / <span id="valRpmR">0</span></div>
-        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Trái / Phải (1/16 vi bước)</div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Trái / Phải (TMC2208 vi bước 1/16)</div>
       </div>
       <div class="card">
         <div class="card-title">Cảm Biến Vật Cản</div>
         <div class="val-large" id="valDistFront">--<span class="val-unit">cm</span></div>
-        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">ToF: <span id="valTof">--</span> mm</div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">ToF VL53L0X: <span id="valTof">--</span> mm</div>
       </div>
     </div>
 
-    <!-- Đồ thị trực quan thời gian thực -->
+    <!-- Đồ thị trực quan thời gian thực (Pitch & Mục tiêu) -->
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div class="card-title">Đồ Thị Thời Gian Thực (Pitch & Mục Tiêu)</div>
-        <div style="font-size: 0.75rem; color: var(--accent);">20 Hz (50ms)</div>
+        <div class="card-title">Sóng Góc Nghiêng Thời Gian Thực (Pitch & Mục Tiêu)</div>
+        <div style="font-size: 0.75rem; color: var(--accent);">Tần số 20 Hz (50ms) | Xanh lá: Pitch, Xanh lam: Target</div>
       </div>
       <div class="chart-container">
         <canvas id="chartCanvas"></canvas>
       </div>
     </div>
 
-    <!-- Nút điều khiển nhanh -->
-    <div class="card">
-      <div class="card-title">Điều Khiển Trạng Thái Robot</div>
-      <div class="btn-group">
-        <button class="btn-arm" onclick="sendCmd('arm')">⚡ BẬT CÂN BẰNG (ARM - X)</button>
-        <button class="btn-disarm" onclick="sendCmd('disarm')">🛑 TẮT ĐỘNG CƠ (DISARM - Z)</button>
+    <!-- Bảng thông số PID HIỆN TẠI đang nạp trên STM32 -->
+    <div class="card" style="border-left: 4px solid var(--purple);">
+      <div class="card-title" style="color:var(--purple);">⚡ THÔNG SỐ PID ĐANG CHẠY TRỰC TIẾP TRÊN XE</div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 8px;">
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Kp Góc</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#38bdf8;" id="liveKp">18.00</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Kd Góc</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#38bdf8;" id="liveKd">1.36</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Ki Góc</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#38bdf8;" id="liveKi">0.00</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Kp Vận Tốc</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#22c55e;" id="liveKpS">0.35</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Ki Vận Tốc</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#22c55e;" id="liveKiS">0.02</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Kp Lái</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#eab308;" id="liveSteer">1.20</div>
+        </div>
+        <div style="background:#0b1120; padding:8px 10px; border-radius:6px; text-align:center;">
+          <div style="font-size:0.75rem; color:var(--muted);">Điểm 0 Trim</div>
+          <div style="font-size:1.15rem; font-weight:700; color:#f97316;" id="liveTrim">0.45°</div>
+        </div>
       </div>
     </div>
 
-    <!-- Bàn Điều Khiển Xe Di Chuyển (D-Pad & Phím W/A/S/D/Space) -->
+    <!-- Nút điều khiển trạng thái an toàn -->
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div class="card-title">🎮 Bàn Điều Khiển Di Chuyển (Phím W/A/S/D/Space)</div>
-        <div style="font-size: 0.8rem; font-weight: 700; color: var(--accent);" id="lblDriveStatus">DỪNG (0, 0)</div>
-      </div>
-
-      <div class="dpad-container">
-        <div class="dpad-row">
-          <button class="btn-dpad" id="btnFwd" onmousedown="startDrive('fwd')" onmouseup="stopDrive()" ontouchstart="startDrive('fwd')" ontouchend="stopDrive()">▲<span style="font-size:0.65rem">TIẾN (W)</span></button>
-        </div>
-        <div class="dpad-row">
-          <button class="btn-dpad" id="btnLeft" onmousedown="startDrive('left')" onmouseup="stopDrive()" ontouchstart="startDrive('left')" ontouchend="stopDrive()">◀<span style="font-size:0.65rem">TRÁI (A)</span></button>
-          <button class="btn-dpad btn-dpad-stop" onclick="stopDrive()">■<span style="font-size:0.65rem">DỪNG</span></button>
-          <button class="btn-dpad" id="btnRight" onmousedown="startDrive('right')" onmouseup="stopDrive()" ontouchstart="startDrive('right')" ontouchend="stopDrive()">▶<span style="font-size:0.65rem">PHẢI (D)</span></button>
-        </div>
-        <div class="dpad-row">
-          <button class="btn-dpad" id="btnBack" onmousedown="startDrive('back')" onmouseup="stopDrive()" ontouchstart="startDrive('back')" ontouchend="stopDrive()">▼<span style="font-size:0.65rem">LÙI (S)</span></button>
-        </div>
-      </div>
-
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px;">
-        <div class="field">
-          <label>Tốc độ đặt (Drive): <span id="lblDriveSpd">500 (50%)</span></label>
-          <input type="range" id="rngDriveSpd" min="100" max="1000" step="50" value="500" oninput="document.getElementById('lblDriveSpd').innerText=this.value+' ('+Math.round(this.value/10)+'%)'">
-        </div>
-        <div class="field">
-          <label>Độ nhạy rẽ (Steer): <span id="lblSteerSpd">300 (30%)</span></label>
-          <input type="range" id="rngSteerSpd" min="100" max="600" step="50" value="300" oninput="document.getElementById('lblSteerSpd').innerText=this.value+' ('+Math.round(this.value/10)+'%)'">
-        </div>
+      <div class="card-title">Điều Khiển Trạng Thái Xe</div>
+      <div class="btn-group">
+        <button class="btn-arm" onclick="sendCmd('arm')">⚡ BẬT CÂN BẰNG (ARM)</button>
+        <button class="btn-disarm" onclick="sendCmd('disarm')">🛑 TẮT ĐỘNG CƠ (DISARM / CẮT KHẨN CẤP)</button>
       </div>
     </div>
 
     <!-- Form Chỉnh Thông Số PID Thời Gian Thực -->
     <div class="card">
-      <div class="card-title">Tinh Chỉnh Thông Số PID Thời Gian Thực</div>
-      <div style="font-size: 0.8rem; color: var(--muted);">Thay đổi giá trị bên dưới và bấm "Lưu & Cập Nhật", thông số sẽ truyền thẳng về STM32 mà không cần dừng xe!</div>
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="card-title">🎛️ BẢNG ĐIỀU KHIỂN & TINH CHỈNH PID THỜI GIAN THỰC</div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; min-width:auto;" onclick="applyPreset('soft')">Êm ái</button>
+          <button class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; min-width:auto;" onclick="applyPreset('stiff')">Cứng cáp</button>
+        </div>
+      </div>
+      <div style="font-size: 0.8rem; color: var(--muted); margin-bottom: 8px;">Thay đổi thông số và bấm <b>"Lưu & Cập Nhật"</b>, giá trị sẽ truyền thẳng về STM32 cập nhật ngay lập tức mà không cần dừng xe hay nạp lại code!</div>
 
       <div class="form-grid">
         <!-- Kp Góc -->
         <div class="field">
-          <label>Kp Góc (Độ cứng vững) <span id="lblKp">18.0</span></label>
-          <input type="number" id="inpKp" step="0.5" min="0" max="100" value="18.0">
-          <input type="range" id="rngKp" min="0" max="60" step="0.5" value="18.0" oninput="syncVal('Kp', this.value)">
+          <label>Kp Góc (Độ cứng vững thân xe) <span id="lblKp" style="color:var(--accent);">18.0</span></label>
+          <div class="field-row">
+            <input type="range" id="rngKp" min="0" max="60" step="0.5" value="18.0" oninput="syncVal('Kp', this.value)">
+            <input type="number" id="inpKp" step="0.5" min="0" max="100" value="18.0">
+          </div>
         </div>
 
         <!-- Kd Góc -->
         <div class="field">
-          <label>Kd Góc (Giảm chấn góc) <span id="lblKd">0.85</span></label>
-          <input type="number" id="inpKd" step="0.05" min="0" max="10" value="0.85">
-          <input type="range" id="rngKd" min="0" max="5" step="0.05" value="0.85" oninput="syncVal('Kd', this.value)">
+          <label>Kd Góc (Giảm chấn góc - Triệt tiêu rung) <span id="lblKd" style="color:var(--accent);">1.36</span></label>
+          <div class="field-row">
+            <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.36" oninput="syncVal('Kd', this.value)">
+            <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.36">
+          </div>
         </div>
 
         <!-- Ki Góc -->
         <div class="field">
-          <label>Ki Góc (Tích phân) <span id="lblKi">0.00</span></label>
-          <input type="number" id="inpKi" step="0.05" min="0" max="10" value="0.0">
-          <input type="range" id="rngKi" min="0" max="5" step="0.05" value="0.0" oninput="syncVal('Ki', this.value)">
+          <label>Ki Góc (Tích phân góc) <span id="lblKi" style="color:var(--accent);">0.00</span></label>
+          <div class="field-row">
+            <input type="range" id="rngKi" min="0" max="3.0" step="0.05" value="0.0" oninput="syncVal('Ki', this.value)">
+            <input type="number" id="inpKi" step="0.05" min="0" max="10" value="0.0">
+          </div>
         </div>
 
-        <!-- Trim / Điểm cân bằng cơ học -->
+        <!-- Kp Vận Tốc -->
         <div class="field">
-          <label>Trim Góc Đặt (Độ nghiêng tự nhiên) <span id="lblTrim">0.0</span>°</label>
-          <input type="number" id="inpTrim" step="0.1" min="-10" max="10" value="0.0">
-          <input type="range" id="rngTrim" min="-5" max="5" step="0.1" value="0.0" oninput="syncVal('Trim', this.value)">
+          <label>Kp Vận Tốc (Độ nhạy vòng ngoài) <span id="lblKpS" style="color:var(--green);">0.35</span></label>
+          <div class="field-row">
+            <input type="range" id="rngKpS" min="0" max="2.0" step="0.05" value="0.35" oninput="syncVal('KpS', this.value)">
+            <input type="number" id="inpKpS" step="0.05" min="0" max="5.0" value="0.35">
+          </div>
+        </div>
+
+        <!-- Ki Vận Tốc -->
+        <div class="field">
+          <label>Ki Vận Tốc (Khử trôi vị trí) <span id="lblKiS" style="color:var(--green);">0.02</span></label>
+          <div class="field-row">
+            <input type="range" id="rngKiS" min="0" max="0.5" step="0.01" value="0.02" oninput="syncVal('KiS', this.value)">
+            <input type="number" id="inpKiS" step="0.01" min="0" max="2.0" value="0.02">
+          </div>
+        </div>
+
+        <!-- Kp Lái (Steer) -->
+        <div class="field">
+          <label>Kp Lái (Độ nhạy rẽ khi bẻ lái) <span id="lblSteer" style="color:var(--yellow);">1.20</span></label>
+          <div class="field-row">
+            <input type="range" id="rngSteer" min="0" max="3.0" step="0.1" value="1.20" oninput="syncVal('Steer', this.value)">
+            <input type="number" id="inpSteer" step="0.1" min="0" max="5.0" value="1.20">
+          </div>
+        </div>
+
+        <!-- Trim Điểm Cân Bằng Cơ Học -->
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên) <span id="lblTrim" style="color:#f97316;">0.45°</span></label>
+          <div class="field-row">
+            <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="0.45" oninput="syncVal('Trim', this.value)">
+            <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="0.45">
+          </div>
         </div>
       </div>
 
-      <button class="btn-submit" onclick="submitPid()">💾 LƯU & CẬP NHẬT PID SANG STM32</button>
+      <div class="btn-group" style="margin-top:12px;">
+        <button class="btn-submit" onclick="submitPid()">💾 LƯU & CẬP NHẬT PID SANG STM32</button>
+        <button class="btn-secondary" onclick="loadFromVehicle()">🔄 NẠP LẠI PID TỪ XE</button>
+      </div>
     </div>
   </div>
 
@@ -270,20 +309,62 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     document.querySelectorAll('input[type=number]').forEach(inp => {
       inp.addEventListener('input', e => {
         const id = e.target.id.replace('inp', '');
-        document.getElementById('rng' + id).value = e.target.value;
-        document.getElementById('lbl' + id).innerText = e.target.value;
+        const r = document.getElementById('rng' + id);
+        if (r) r.value = e.target.value;
+        const l = document.getElementById('lbl' + id);
+        if (l) l.innerText = e.target.value;
       });
     });
+
+    function applyPreset(type) {
+      if (type === 'soft') {
+        syncVal('Kp', 18.0);
+        syncVal('Kd', 1.36);
+        syncVal('Ki', 0.0);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.02);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', 0.45);
+        showToast("Đã chọn preset: ÊM ÁI (Khuyên dùng)");
+      } else if (type === 'stiff') {
+        syncVal('Kp', 24.0);
+        syncVal('Kd', 1.80);
+        syncVal('Ki', 0.05);
+        syncVal('KpS', 0.45);
+        syncVal('KiS', 0.03);
+        syncVal('Steer', 1.40);
+        syncVal('Trim', 0.45);
+        showToast("Đã chọn preset: CỨNG CÁP");
+      }
+    }
+
+    let latestTelemetry = null;
+
+    function loadFromVehicle() {
+      if (latestTelemetry) {
+        if (typeof latestTelemetry.kp === 'number') syncVal('Kp', latestTelemetry.kp);
+        if (typeof latestTelemetry.kd === 'number') syncVal('Kd', latestTelemetry.kd);
+        if (typeof latestTelemetry.ki === 'number') syncVal('Ki', latestTelemetry.ki);
+        if (typeof latestTelemetry.kp_s === 'number') syncVal('KpS', latestTelemetry.kp_s);
+        if (typeof latestTelemetry.ki_s === 'number') syncVal('KiS', latestTelemetry.ki_s);
+        if (typeof latestTelemetry.steer === 'number') syncVal('Steer', latestTelemetry.steer);
+        if (typeof latestTelemetry.trim === 'number') syncVal('Trim', latestTelemetry.trim);
+        showToast("Đã nạp thông số hiện tại từ xe vào bảng chỉnh!");
+      }
+    }
 
     function submitPid() {
       const kp = document.getElementById('inpKp').value;
       const kd = document.getElementById('inpKd').value;
       const ki = document.getElementById('inpKi').value;
+      const kp_s = document.getElementById('inpKpS').value;
+      const ki_s = document.getElementById('inpKiS').value;
+      const steer = document.getElementById('inpSteer').value;
       const trim = document.getElementById('inpTrim').value;
 
-      fetch(`/api/set_pid?kp=${kp}&kd=${kd}&ki=${ki}&target=${trim}`, { method: 'POST' })
+      fetch(`/api/set_pid?kp=${kp}&kd=${kd}&ki=${ki}&kp_s=${kp_s}&ki_s=${ki_s}&steer=${steer}&trim=${trim}`, { method: 'POST' })
         .then(r => r.text())
-        .then(res => { showToast("Đã gửi thông số PID sang STM32!"); })
+        .then(res => { showToast("Đã gửi toàn bộ thông số PID sang STM32!"); })
         .catch(err => { showToast("Lỗi gửi PID: " + err); });
     }
 
@@ -293,64 +374,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         .then(res => { showToast("Đã gửi lệnh: " + act.toUpperCase()); })
         .catch(err => { showToast("Lỗi gửi lệnh: " + err); });
     }
-
-    /* Logic điều khiển di chuyển xe qua Web & Bàn phím */
-    let driveInterval = null;
-
-    function sendDriveCmd(spd, str) {
-      const lbl = document.getElementById('lblDriveStatus');
-      if (lbl) {
-        lbl.innerText = (spd === 0 && str === 0) ? "DỪNG (0, 0)" : `CHẠY (${spd}, ${str})`;
-      }
-      fetch(`/api/drive?speed=${spd}&steer=${str}`, { method: 'POST' }).catch(()=>{});
-    }
-
-    function startDrive(dir) {
-      const spdVal = parseInt(document.getElementById('rngDriveSpd').value);
-      const strVal = parseInt(document.getElementById('rngSteerSpd').value);
-      let s = 0, st = 0;
-      if (dir === 'fwd') s = spdVal;
-      else if (dir === 'back') s = -spdVal;
-      else if (dir === 'left') st = -strVal;
-      else if (dir === 'right') st = strVal;
-
-      sendDriveCmd(s, st);
-      if (driveInterval) clearInterval(driveInterval);
-      driveInterval = setInterval(() => { sendDriveCmd(s, st); }, 120);
-    }
-
-    function stopDrive() {
-      if (driveInterval) { clearInterval(driveInterval); driveInterval = null; }
-      sendDriveCmd(0, 0);
-    }
-
-    /* Bắt sự kiện bàn phím máy tính W / A / S / D / Space / X / Z */
-    const keysPressed = {};
-    window.addEventListener('keydown', (e) => {
-      const k = e.key.toLowerCase();
-      if (['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'x', 'z'].includes(k)) {
-        if (!keysPressed[k]) {
-          keysPressed[k] = true;
-          if (k === 'w' || k === 'arrowup') startDrive('fwd');
-          else if (k === 's' || k === 'arrowdown') startDrive('back');
-          else if (k === 'a' || k === 'arrowleft') startDrive('left');
-          else if (k === 'd' || k === 'arrowright') startDrive('right');
-          else if (k === ' ') stopDrive();
-          else if (k === 'x') sendCmd('arm');
-          else if (k === 'z') sendCmd('disarm');
-        }
-      }
-    });
-
-    window.addEventListener('keyup', (e) => {
-      const k = e.key.toLowerCase();
-      if (keysPressed[k]) {
-        keysPressed[k] = false;
-        if (['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) {
-          stopDrive();
-        }
-      }
-    });
 
     // Chart Canvas setup
     const canvas = document.getElementById('chartCanvas');
@@ -362,7 +385,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     function drawChart() {
       const container = canvas.parentElement;
       const targetW = (container && container.clientWidth > 50) ? container.clientWidth : 600;
-      const targetH = (container && container.clientHeight > 50) ? container.clientHeight : 200;
+      const targetH = (container && container.clientHeight > 50) ? container.clientHeight : 210;
 
       if (canvas.width !== targetW || canvas.height !== targetH) {
         canvas.width = targetW;
@@ -374,16 +397,26 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       const h = canvas.height;
       const midY = h / 2;
 
-      // Draw zero line
-      ctx.strokeStyle = '#334155';
+      // Draw grid lines
+      ctx.strokeStyle = '#1e293b';
       ctx.lineWidth = 1;
+      const scale = (midY - 10) / 20.0; // ±20 degrees full scale
+
+      [-10, 10].forEach(deg => {
+        const y = midY - (deg * scale);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      });
+
+      // Zero line
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(0, midY);
       ctx.lineTo(w, midY);
       ctx.stroke();
-
-      // Helper to map angle [-25..+25] to Y [h..0]
-      const scale = (midY - 10) / 25.0; // 25 degrees full scale
 
       // Draw Target line (Blue)
       ctx.strokeStyle = '#38bdf8';
@@ -399,7 +432,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
       // Draw Pitch line (Green)
       ctx.strokeStyle = '#22c55e';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
       for (let i = 0; i < maxPoints; i++) {
         const x = (i / (maxPoints - 1)) * w;
@@ -419,6 +452,8 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         .then(r => r.json())
         .then(d => {
           if (!d) return;
+          latestTelemetry = d;
+
           const pitch = (typeof d.pitch === 'number' && Number.isFinite(d.pitch)) ? d.pitch : 0.0;
           const target = (typeof d.target === 'number' && Number.isFinite(d.target)) ? d.target : 0.0;
           const rate = (typeof d.rate === 'number' && Number.isFinite(d.rate)) ? d.rate : 0.0;
@@ -427,7 +462,13 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           const distF = (typeof d.dist_f === 'number') ? d.dist_f : 999;
           const tof = (typeof d.tof_mm === 'number') ? d.tof_mm : 8190;
 
-          document.getElementById('valPitch').innerHTML = pitch.toFixed(2) + '<span class="val-unit">°</span>';
+          // Cập nhật thẻ đo góc với màu sắc cảnh báo trực quan
+          const elPitch = document.getElementById('valPitch');
+          elPitch.innerHTML = pitch.toFixed(2) + '<span class="val-unit">°</span>';
+          if (Math.abs(pitch) < 3.0) elPitch.style.color = 'var(--green)';
+          else if (Math.abs(pitch) < 15.0) elPitch.style.color = 'var(--yellow)';
+          else elPitch.style.color = 'var(--red)';
+
           document.getElementById('valTarget').innerText = target.toFixed(2);
           document.getElementById('valRate').innerHTML = rate.toFixed(1) + '<span class="val-unit">°/s</span>';
           document.getElementById('valRpmL').innerText = Math.round(rpmL);
@@ -435,12 +476,21 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           document.getElementById('valDistFront').innerHTML = (distF < 400 ? distF : '--') + '<span class="val-unit">cm</span>';
           document.getElementById('valTof').innerText = (tof < 8000 ? tof : '--');
 
+          // Cập nhật thông số PID hiện tại từ STM32
+          if (typeof d.kp === 'number') document.getElementById('liveKp').innerText = d.kp.toFixed(2);
+          if (typeof d.kd === 'number') document.getElementById('liveKd').innerText = d.kd.toFixed(2);
+          if (typeof d.ki === 'number') document.getElementById('liveKi').innerText = d.ki.toFixed(2);
+          if (typeof d.kp_s === 'number') document.getElementById('liveKpS').innerText = d.kp_s.toFixed(2);
+          if (typeof d.ki_s === 'number') document.getElementById('liveKiS').innerText = d.ki_s.toFixed(2);
+          if (typeof d.steer === 'number') document.getElementById('liveSteer').innerText = d.steer.toFixed(2);
+          if (typeof d.trim === 'number') document.getElementById('liveTrim').innerText = d.trim.toFixed(2) + '°';
+
           const b = document.getElementById('badgeState');
           const st = d.state || 0;
           b.innerText = stateNames[st] || "UNKNOWN";
           b.className = "badge " + (stateBadges[st] || "badge-boot");
 
-          // Cập nhật các trạng thái chẩn đoán phần cứng
+          // Trạng thái UART STM32
           const bLink = document.getElementById('badgeStmLink');
           if (d.stm_link) {
             bLink.innerText = "ĐÃ KẾT NỐI (UART OK)";
@@ -452,6 +502,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
             bLink.style.color = "#fff";
           }
 
+          // Trạng thái MPU6050
           const bMpu = document.getElementById('badgeMpu');
           if (d.stm_link && d.mpu_ok) {
             bMpu.innerText = "BÌNH THƯỜNG (0 LỖI)";
@@ -466,13 +517,18 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
             bMpu.style.background = "var(--muted)";
           }
 
+          // Trạng thái Sóng NRF24: phân biệt rõ giữa "chờ tay cầm" và "lỗi phần cứng"
           const bNrf = document.getElementById('badgeNrf');
-          if (d.stm_link && d.nrf_ok) {
-            bNrf.innerText = "SẴN SÀNG (SPI2 OK)";
+          if (d.stm_link && d.nrf_link) {
+            bNrf.innerText = "TAY CẦM ĐÃ NỐI 🟢";
             bNrf.style.background = "var(--green)";
             bNrf.style.color = "#fff";
+          } else if (d.stm_link && d.nrf_hw) {
+            bNrf.innerText = "CHỜ TAY CẦM (NRF SẴN SÀNG) 🟡";
+            bNrf.style.background = "var(--yellow)";
+            bNrf.style.color = "#000";
           } else if (d.stm_link) {
-            bNrf.innerText = "LỖI NRF XE";
+            bNrf.innerText = "LỖI NRF XE (SPI2)";
             bNrf.style.background = "var(--red)";
             bNrf.style.color = "#fff";
           } else {

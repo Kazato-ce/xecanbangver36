@@ -145,26 +145,35 @@ static void process_json_command(const char *line)
 {
     /* Format: {"type":"set_pid","seq":1,"kp":18.0,"ki":0.0,"kd":0.85,"target":0.0} */
     if (strstr(line, "\"type\":\"set_pid\"") || strstr(line, "\"type\": \"set_pid\"")) {
-        float kp = 0, ki = 0, kd = 0, target = 0;
+        float cur_kp, cur_kd, cur_ki, cur_kp_s, cur_ki_s, cur_steer;
+        balance_get_pid(&cur_kp, &cur_kd, &cur_ki, &cur_kp_s, &cur_ki_s, &cur_steer);
+        float kp = cur_kp, kd = cur_kd, ki = cur_ki;
+        float kp_s = cur_kp_s, ki_s = cur_ki_s, steer = cur_steer;
+        float target = balance_get_target_offset();
         uint32_t seq = 0;
 
         const char *p_seq = strstr(line, "\"seq\":");
         if (p_seq) seq = (uint32_t)strtoul(p_seq + 6, NULL, 10);
 
         const char *p_kp = strstr(line, "\"kp\":");
-        const char *p_ki = strstr(line, "\"ki\":");
         const char *p_kd = strstr(line, "\"kd\":");
+        const char *p_ki = strstr(line, "\"ki\":");
+        const char *p_kps = strstr(line, "\"kp_s\":");
+        const char *p_kis = strstr(line, "\"ki_s\":");
+        const char *p_str = strstr(line, "\"steer\":");
         const char *p_tgt = strstr(line, "\"target\":");
+        const char *p_trm = strstr(line, "\"trim\":");
 
-        float cur_kp, cur_kd, cur_ki, cur_kp_s, cur_ki_s, cur_steer;
-        balance_get_pid(&cur_kp, &cur_kd, &cur_ki, &cur_kp_s, &cur_ki_s, &cur_steer);
-
-        if (p_kp) kp = strtof(p_kp + 5, NULL); else kp = cur_kp;
-        if (p_kd) kd = strtof(p_kd + 5, NULL); else kd = cur_kd;
-        if (p_ki) ki = strtof(p_ki + 5, NULL); else ki = cur_ki;
+        if (p_kp) kp = strtof(p_kp + 5, NULL);
+        if (p_kd) kd = strtof(p_kd + 5, NULL);
+        if (p_ki) ki = strtof(p_ki + 5, NULL);
+        if (p_kps) kp_s = strtof(p_kps + 7, NULL);
+        if (p_kis) ki_s = strtof(p_kis + 7, NULL);
+        if (p_str) steer = strtof(p_str + 8, NULL);
         if (p_tgt) target = strtof(p_tgt + 9, NULL);
+        else if (p_trm) target = strtof(p_trm + 7, NULL);
 
-        balance_set_pid(kp, kd, ki, cur_kp_s, cur_ki_s, cur_steer);
+        balance_set_pid(kp, kd, ki, kp_s, ki_s, steer);
         balance_set_target_offset(target);
 
         char resp[96];
@@ -288,23 +297,26 @@ static void send_telemetry(void)
 
     bool mpu_ok = imu_is_calibrated() && (imu_get_error_count() == 0);
     uint32_t imu_err = imu_get_error_count();
-    bool nrf_ok = radio_is_connected();
+    bool nrf_hw = radio_is_hardware_ok();
+    bool nrf_link = radio_is_connected();
     bool spm_ok = telemetry_uart_is_supermini_linked();
-    bool upright = (fabsf(pitch - balance_get_target_offset()) <= ARM_UPRIGHT_ANGLE_DEG);
+    float trim = balance_get_target_offset();
+    bool upright = (fabsf(pitch - trim) <= ARM_UPRIGHT_ANGLE_DEG);
     float arm_cd = sm_get_auto_arm_countdown_s();
 
-    char buf[320];
+    char buf[360];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"telemetry\",\"seq\":%lu,\"state\":%d,\"fault\":%d,\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
-        "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,"
+        "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
         "\"dist_f\":%u,\"tof_mm\":%u,\"bat\":14.8,"
-        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_ok\":%s,\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
+        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_hw\":%s,\"nrf_link\":%s,\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
         (unsigned long)s_telemetry_seq++, (int)state, (int)fault,
         pitch, target_pitch, rate,
-        left_rpm, right_rpm, kp, kd, ki,
+        left_rpm, right_rpm, kp, kd, ki, kp_s, ki_s, steer, trim,
         (unsigned)dist_f, (unsigned)tof_mm,
         mpu_ok ? "true" : "false", (unsigned long)imu_err,
-        nrf_ok ? "true" : "false", spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd);
+        nrf_hw ? "true" : "false", nrf_link ? "true" : "false",
+        spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd);
 
     uart_send_string(buf);
 }
