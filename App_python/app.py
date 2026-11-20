@@ -3,14 +3,15 @@
 """
 ================================================================================
   MÁY TRẠM ĐIỀU KHIỂN & GIÁM SÁT XE CÂN BẰNG 2 BÁNH STM32F405 (GCS)
+  TÍCH HỢP ESP32-CAM VIDEO STREAM & NỀN TẢNG NHẬN DIỆN THỊ GIÁC MÁY TÍNH (AI/CV)
 ================================================================================
 Tác vụ chính:
- 1. Kết nối Serial COM siêu tốc (115200 baud) qua ESP32 DevKit V1 NRF24 Dongle.
- 2. Điều khiển xe 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải,
-    Lùi-Trái, Lùi-Phải (Hỗ trợ bàn phím W/A/S/D/Q/E/Z/C/Space/X).
- 3. Giám sát Telemetry thời gian thực: Góc Pitch, Tốc độ góc Gyro, Pin 4S, Vật cản.
- 4. Bảng điều khiển tối giản, loại bỏ hoàn toàn các khối video nặng nề, khởi động
-    ngay tức thì không cần cài OpenCV/Pillow.
+ 1. Video Stream từ ESP32-CAM qua HTTP MJPEG/RTSP (sẵn sàng phát triển AI nhận diện).
+ 2. Pipeline xử lý thị giác máy tính OpenCV (Color/Object tracking, Line detection).
+ 3. Kết nối Serial COM siêu tốc (115200 baud) qua ESP32 DevKit V1 NRF24 Dongle.
+ 4. Điều khiển 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải,
+    Lùi-Trái, Lùi-Phải (Phím tắt: W/A/S/D/Q/E/Z/C/Space/X/V).
+ 5. Giám sát Telemetry thời gian thực: Góc Pitch, Tốc độ góc Gyro, Pin 4S, Vật cản.
 ================================================================================
 """
 
@@ -21,16 +22,23 @@ import re
 import datetime
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
-# Import driver serial tùy biến (tương thích cả pyserial lẫn Windows ctypes gốc)
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
+
+# Import driver serial và video worker
 try:
     from serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
+    from video_worker import VideoStreamWorker
 except ImportError:
     try:
         from tools.python_ground_station.serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
+        from tools.python_ground_station.video_worker import VideoStreamWorker
     except ImportError:
         SerialClient = None
+        VideoStreamWorker = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BẢNG MÀU GIAO DIỆN HIỆN ĐẠI (DARK THEME)
@@ -55,12 +63,12 @@ THEME = {
 class GroundStationApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Xe Cân Bằng STM32F405 - Ground Control Station (8-Way Radio)")
-        self.root.geometry("1180x760")
-        self.root.minsize(980, 640)
+        self.root.title("Xe Cân Bằng STM32F405 — Ground Control Station & ESP32-CAM Vision")
+        self.root.geometry("1320x840")
+        self.root.minsize(1100, 720)
         self.root.configure(bg=THEME["bg"])
 
-        # Trạng thái Serial
+        # Trạng thái Serial COM
         self.serial_client = None
         self.serial_thread = None
         self.serial_running = False
@@ -68,6 +76,18 @@ class GroundStationApp:
         self.auto_reconnect_var = tk.BooleanVar(value=True)
         self.auto_reconnecting = False
         self._last_reconnect_attempt_ms = 0
+
+        # Trạng thái Video Stream ESP32-CAM
+        self.video_worker = None
+        self.current_frame = None
+        self.photo_img = None
+        self.fps_display = 0.0
+
+        # Trạng thái Xử lý Thị giác máy tính (AI / Vision Recognition)
+        self.ai_vision_enabled = tk.BooleanVar(value=False)
+        self.ai_mode = tk.StringVar(value="Color / Object Tracking")
+        self.ai_auto_steer_enabled = tk.BooleanVar(value=False)
+        self.detected_target = None  # (cx, cy, radius)
 
         # Biến trạng thái xe
         self.robot_state_str = "DISCONNECTED"
@@ -83,7 +103,6 @@ class GroundStationApp:
         # Biến chẩn đoán phần cứng
         self.diag_mpu_ok = False
         self.diag_nrf_ok = False
-        self.diag_upright = False
         self.nrf_link_ok = False
 
         # Khởi tạo giao diện
@@ -98,8 +117,11 @@ class GroundStationApp:
         self.refresh_ports()
         self.root.after(500, self._auto_connect_dongle)
 
-        # Bắt đầu vòng lặp cập nhật giao diện (40 ms = 25 Hz)
-        self.root.after(40, self._ui_periodic_update)
+        # Bắt đầu vòng lặp cập nhật giao diện (33 ms ~ 30 FPS)
+        self.root.after(33, self._ui_periodic_update)
+
+        # Đăng ký đóng cửa sổ an toàn
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     # ──────────────────────────────────────────────────────────────────────────
     # HEADER: TIÊU ĐỀ & ĐỒNG HỒ HỆ THỐNG
@@ -110,8 +132,8 @@ class GroundStationApp:
 
         title_lbl = tk.Label(
             header,
-            text="⚡ GROUND CONTROL STATION — ROBOT TỰ CÂN BẰNG 2 BÁNH STM32F405",
-            font=("Segoe UI", 12, "bold"),
+            text="⚡ ROBOT TỰ CÂN BẰNG STM32F405 — GROUND STATION & ESP32-CAM AI VISION",
+            font=("Segoe UI", 11, "bold"),
             fg=THEME["primary"],
             bg=THEME["panel"]
         )
@@ -120,7 +142,7 @@ class GroundStationApp:
         self.lbl_dongle_status = tk.Label(
             header,
             text="● DONGLE: CHƯA KẾT NỐI",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["danger"],
             bg=THEME["panel"],
             padx=12
@@ -137,32 +159,33 @@ class GroundStationApp:
         self.lbl_system_clock.pack(side=tk.RIGHT)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # BỐ CỤC CHÍNH: 2 CỘT (TRÁI: TELEMETRY & COM | PHẢI: ĐIỀU KHIỂN 8 HƯỚNG & CONSOLE)
+    # BỐ CỤC CHÍNH (CỘT TRÁI: VIDEO & AI VISION | CỘT PHẢI: TELEMETRY & 8-WAY DRIVE)
     # ──────────────────────────────────────────────────────────────────────────
     def _build_main_layout(self):
-        main_pane = tk.Frame(self.root, bg=THEME["bg"], padx=10, pady=8)
+        main_pane = tk.Frame(self.root, bg=THEME["bg"], padx=8, pady=6)
         main_pane.pack(fill=tk.BOTH, expand=True)
 
-        # Cột trái: Kết nối Serial COM + Giám sát Telemetry
-        left_col = tk.Frame(main_pane, bg=THEME["bg"], width=520, padx=5, pady=5)
+        # Cột trái: Khung Video Stream ESP32-CAM + Bộ điều khiển AI Vision (~55% chiều rộng)
+        left_col = tk.Frame(main_pane, bg=THEME["bg"], padx=4, pady=4)
         left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Cột phải: Bảng điều khiển 8 hướng + Terminal Console
-        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=620, padx=5, pady=5)
-        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Cột phải: COM Port, Telemetry, Điều khiển 8 hướng, Terminal (~45% chiều rộng)
+        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=540, padx=4, pady=4)
+        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False)
 
-        self._build_serial_panel(left_col)
-        self._build_telemetry_panel(left_col)
+        self._build_video_panel(left_col)
+        self._build_serial_panel(right_col)
+        self._build_telemetry_panel(right_col)
         self._build_controls_8way_panel(right_col)
         self._build_console_panel(right_col)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 1: KẾT NỐI SERIAL COM USB
+    # PANEL 1: KHUNG STREAM VIDEO ESP32-CAM & NHẬN DIỆN THỊ GIÁC AI
     # ──────────────────────────────────────────────────────────────────────────
-    def _build_serial_panel(self, parent):
+    def _build_video_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 🔌 Cổng USB Serial COM (ESP32 DevKit NRF24 Dongle) ",
+            text=" 📹 ESP32-CAM Video Stream & Nền Tảng Thị Giác Máy Tính (AI / Vision) ",
             font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
@@ -171,41 +194,342 @@ class GroundStationApp:
             padx=10,
             pady=8
         )
-        card.pack(fill=tk.X, pady=(0, 8))
+        card.pack(fill=tk.BOTH, expand=True)
+
+        # Hàng 1: URL Stream & Nút kết nối
+        url_frame = tk.Frame(card, bg=THEME["card"])
+        url_frame.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(url_frame, text="URL Stream:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.cb_stream_url = ttk.Combobox(
+            url_frame,
+            values=[
+                "http://192.168.4.2/stream",           # ESP32-CAM phát WiFi Access Point
+                "http://192.168.4.2:81/stream",
+                "http://192.168.1.100:81/stream",       # ESP32-CAM kết nối WiFi nhà
+                "http://192.168.1.50/stream",
+                "http://192.168.4.2/capture",          # Chế độ chụp ảnh snapshot
+                "0"                                    # Webcam laptop/PC (thử nghiệm)
+            ],
+            width=32,
+            font=("Consolas", 9)
+        )
+        self.cb_stream_url.set("http://192.168.4.2/stream")
+        self.cb_stream_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        self.btn_toggle_stream = tk.Button(
+            url_frame,
+            text="▶ MỞ STREAM",
+            font=("Segoe UI", 9, "bold"),
+            bg=THEME["primary"],
+            fg="#11111b",
+            activebackground=THEME["accent"],
+            relief=tk.FLAT,
+            padx=12,
+            pady=3,
+            command=self.toggle_video_stream
+        )
+        self.btn_toggle_stream.pack(side=tk.LEFT, padx=4)
+
+        btn_snap = tk.Button(
+            url_frame,
+            text="📷 Chụp Ảnh",
+            font=("Segoe UI", 9),
+            bg=THEME["card_alt"],
+            fg=THEME["text"],
+            relief=tk.FLAT,
+            padx=8,
+            pady=3,
+            command=self.save_snapshot
+        )
+        btn_snap.pack(side=tk.LEFT, padx=2)
+
+        # Hàng 2: Thanh công cụ Nhận diện AI / Thị giác máy tính (Computer Vision)
+        ai_frame = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=5, relief=tk.GROOVE, bd=1)
+        ai_frame.pack(fill=tk.X, pady=(0, 6))
+
+        chk_ai = tk.Checkbutton(
+            ai_frame,
+            text="⚡ BẬT NHẬN DIỆN AI / CV",
+            variable=self.ai_vision_enabled,
+            fg=THEME["success"],
+            bg=THEME["card_alt"],
+            selectcolor="#11111b",
+            activebackground=THEME["card_alt"],
+            activeforeground=THEME["success"],
+            font=("Segoe UI", 9, "bold")
+        )
+        chk_ai.pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Label(ai_frame, text="Chế độ:", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT, padx=(0, 4))
+
+        cb_ai_mode = ttk.Combobox(
+            ai_frame,
+            textvariable=self.ai_mode,
+            values=[
+                "Color / Object Tracking",
+                "Line Following (Bám đường)",
+                "Edge / Canny Detection",
+                "Raw (Không xử lý)"
+            ],
+            width=22,
+            font=("Segoe UI", 8)
+        )
+        cb_ai_mode.pack(side=tk.LEFT, padx=(0, 8))
+
+        chk_auto = tk.Checkbutton(
+            ai_frame,
+            text="Tự động lái theo mục tiêu",
+            variable=self.ai_auto_steer_enabled,
+            fg=THEME["accent"],
+            bg=THEME["card_alt"],
+            selectcolor="#11111b",
+            activebackground=THEME["card_alt"],
+            activeforeground=THEME["accent"],
+            font=("Segoe UI", 8)
+        )
+        chk_auto.pack(side=tk.LEFT)
+
+        # Khung Video Canvas hiển thị khung hình
+        self.video_canvas = tk.Canvas(
+            card,
+            bg="#0b0b12",
+            highlightthickness=1,
+            highlightbackground=THEME["border"]
+        )
+        self.video_canvas.pack(fill=tk.BOTH, expand=True)
+        self.video_canvas.bind("<Configure>", self._on_canvas_resize)
+
+        # Vẽ hình nền chờ ban đầu
+        self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream (ví dụ http://192.168.4.2/stream) và bấm 'MỞ STREAM'")
+
+        # Thanh trạng thái video dưới đáy
+        info_bar = tk.Frame(card, bg=THEME["card_alt"], height=24, padx=8, pady=2)
+        info_bar.pack(fill=tk.X, pady=(4, 0))
+
+        self.lbl_stream_status = tk.Label(
+            info_bar,
+            text="● STREAM TẮT",
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card_alt"]
+        )
+        self.lbl_stream_status.pack(side=tk.LEFT)
+
+        self.lbl_fps = tk.Label(
+            info_bar,
+            text="FPS: 0.0 | Phân giải: --x--",
+            font=("Consolas", 8),
+            fg=THEME["subtext"],
+            bg=THEME["card_alt"]
+        )
+        self.lbl_fps.pack(side=tk.RIGHT)
+
+    def _draw_video_placeholder(self, message):
+        self.video_canvas.delete("all")
+        w = max(self.video_canvas.winfo_width(), 400)
+        h = max(self.video_canvas.winfo_height(), 300)
+        self.video_canvas.create_text(
+            w // 2, h // 2,
+            text=f"📷\n\n{message}",
+            fill=THEME["subtext"],
+            font=("Segoe UI", 11),
+            justify=tk.CENTER
+        )
+
+    def _on_canvas_resize(self, event):
+        if self.video_worker is None or not self.video_worker.running:
+            self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream và bấm 'MỞ STREAM'")
+
+    def toggle_video_stream(self):
+        if self.video_worker and self.video_worker.running:
+            self.stop_video_stream()
+        else:
+            self.start_video_stream()
+
+    def start_video_stream(self):
+        if VideoStreamWorker is None:
+            messagebox.showerror("Lỗi", "Không tìm thấy module video_worker.py!")
+            return
+
+        url = self.cb_stream_url.get().strip()
+        if not url:
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập đường dẫn URL Stream của ESP32-CAM!")
+            return
+
+        self.btn_toggle_stream.config(text="⏹ DỪNG STREAM", bg=THEME["danger"])
+        self.lbl_stream_status.config(text="● ĐANG KẾT NỐI...", fg=THEME["warning"])
+
+        self.video_worker = VideoStreamWorker(
+            source_url=url,
+            on_frame=self._on_video_frame,
+            on_status=self._on_video_status
+        )
+        self.video_worker.start()
+        self._log_console(f"[VISION] Đang kết nối video stream: {url}", "info")
+
+    def stop_video_stream(self):
+        if self.video_worker:
+            self.video_worker.stop()
+            self.video_worker = None
+        self.btn_toggle_stream.config(text="▶ MỞ STREAM", bg=THEME["primary"])
+        self.lbl_stream_status.config(text="● STREAM ĐÃ DỪNG", fg=THEME["subtext"])
+        self.lbl_fps.config(text="FPS: 0.0 | Phân giải: --x--")
+        self._draw_video_placeholder("Stream đã dừng.\nBấm 'MỞ STREAM' để kết nối lại.")
+        self._log_console("[VISION] Đã dừng video stream.", "info")
+
+    def _on_video_frame(self, frame_bgr, fps):
+        self.current_frame = frame_bgr
+        self.fps_display = fps
+
+    def _on_video_status(self, msg, is_ok):
+        def _update():
+            if is_ok:
+                self.lbl_stream_status.config(text="● LIVE STREAM (ESP32-CAM OK)", fg=THEME["success"])
+            else:
+                self.lbl_stream_status.config(text=f"● {msg}", fg=THEME["danger"] if "Lỗi" in msg else THEME["warning"])
+        self.root.after(0, _update)
+
+    def save_snapshot(self):
+        if self.current_frame is None:
+            messagebox.showinfo("Thông báo", "Chưa có khung hình video nào để lưu!")
+            return
+
+        snap_dir = os.path.join(os.path.dirname(__file__), "snapshots")
+        os.makedirs(snap_dir, exist_ok=True)
+        fname = datetime.datetime.now().strftime("snapshot_%Y%m%d_%H%M%S.png")
+        path = os.path.join(snap_dir, fname)
+
+        cv2.imwrite(path, self.current_frame)
+        self._log_console(f"[VISION] Đã lưu ảnh snapshot: {fname}", "info")
+        messagebox.showinfo("Thành công", f"Đã lưu ảnh snapshot vào:\n{path}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PIPELINE XỬ LÝ THỊ GIÁC MÁY TÍNH (COMPUTER VISION / AI HOOK)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _process_ai_vision(self, frame):
+        """
+        Hook xử lý hình ảnh thời gian thực từ ESP32-CAM:
+        Người dùng có thể dễ dàng thêm mô hình nhận diện AI, YOLO, Haar Cascade hoặc Color Tracking vào đây.
+        """
+        if not self.ai_vision_enabled.get():
+            return frame
+
+        mode = self.ai_mode.get()
+        h, w = frame.shape[:2]
+
+        if mode == "Color / Object Tracking":
+            # Ví dụ: Nhận diện vật thể màu sắc (Color Blob Tracking trong không gian HSV)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # Ngưỡng màu (Ví dụ: Màu đỏ / cam / xanh có thể tùy biến)
+            lower_color = np.array([0, 120, 70])
+            upper_color = np.array([10, 255, 255])
+            mask1 = cv2.inRange(hsv, lower_color, upper_color)
+
+            lower_color2 = np.array([170, 120, 70])
+            upper_color2 = np.array([180, 255, 255])
+            mask2 = cv2.inRange(hsv, lower_color2, upper_color2)
+
+            mask = mask1 | mask2
+            mask = cv2.erode(mask, None, iterations=2)
+            mask = cv2.dilate(mask, None, iterations=2)
+
+            contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                c = max(contours, key=cv2.contourArea)
+                ((cx, cy), radius) = cv2.minEnclosingCircle(c)
+                if radius > 15:
+                    # Vẽ vòng tròn mục tiêu
+                    cv2.circle(frame, (int(cx), int(cy)), int(radius), (0, 255, 0), 2)
+                    cv2.circle(frame, (int(cx), int(cy)), 4, (0, 0, 255), -1)
+
+                    # Tính độ lệch so với tâm khung hình
+                    center_x = w // 2
+                    err_x = cx - center_x
+                    cv2.line(frame, (center_x, int(cy)), (int(cx), int(cy)), (255, 255, 0), 1)
+
+                    text = f"Target: ({int(cx)}, {int(cy)}) | Err_X: {int(err_x)}"
+                    cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                    # Tự động lái xe bám theo mục tiêu nếu bật tính năng Auto Steer
+                    if self.ai_auto_steer_enabled.get() and self.serial_running:
+                        steer_val = int(np.clip(err_x * 1.5, -400, 400))
+                        drive_val = 150 if abs(err_x) < 80 else 0
+                        self.send_serial_command(f"DRIVE {drive_val} {steer_val}")
+
+        elif mode == "Line Following (Bám đường)":
+            # Chuyển sang ảnh xám và ngưỡng nhị phân
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            _, thresh = cv2.threshold(blur, 60, 255, cv2.THRESH_BINARY_INV)
+
+            # Vùng quan tâm (ROI) ở nửa dưới khung hình
+            roi = thresh[int(h * 0.6):, :]
+            M = cv2.moments(roi)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"]) + int(h * 0.6)
+                cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
+                cv2.line(frame, (w // 2, cy), (cx, cy), (0, 255, 255), 2)
+
+        elif mode == "Edge / Canny Detection":
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+            frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+        return frame
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PANEL 2: KẾT NỐI SERIAL COM USB (ESP32 DevKit NRF24 Dongle)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _build_serial_panel(self, parent):
+        card = tk.LabelFrame(
+            parent,
+            text=" 🔌 Cổng USB Serial COM (ESP32 DevKit NRF24 Dongle) ",
+            font=("Segoe UI", 9, "bold"),
+            fg=THEME["primary"],
+            bg=THEME["card"],
+            bd=1,
+            relief=tk.SOLID,
+            padx=10,
+            pady=6
+        )
+        card.pack(fill=tk.X, pady=(0, 6))
 
         row1 = tk.Frame(card, bg=THEME["card"])
         row1.pack(fill=tk.X, pady=2)
 
-        tk.Label(row1, text="Cổng COM:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(row1, text="Cổng COM:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 4))
 
-        self.cb_ports = ttk.Combobox(row1, width=16, font=("Consolas", 9))
-        self.cb_ports.pack(side=tk.LEFT, padx=(0, 6))
+        self.cb_ports = ttk.Combobox(row1, width=14, font=("Consolas", 8))
+        self.cb_ports.pack(side=tk.LEFT, padx=(0, 4))
 
         btn_refresh = tk.Button(
-            row1, text="🔄 Quét", font=("Segoe UI", 8, "bold"),
-            bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT, padx=8, pady=2,
+            row1, text="🔄 Quét", font=("Segoe UI", 8),
+            bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT, padx=6, pady=1,
             command=self.refresh_ports
         )
-        btn_refresh.pack(side=tk.LEFT, padx=(0, 8))
+        btn_refresh.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_connect = tk.Button(
-            row1, text="⚡ KẾT NỐI", font=("Segoe UI", 9, "bold"),
+            row1, text="⚡ KẾT NỐI", font=("Segoe UI", 8, "bold"),
             bg=THEME["primary"], fg="#11111b", activebackground=THEME["accent"],
-            relief=tk.FLAT, padx=12, pady=3,
+            relief=tk.FLAT, padx=10, pady=2,
             command=self.toggle_serial_connection
         )
-        self.btn_connect.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_connect.pack(side=tk.LEFT, padx=(0, 6))
 
         btn_ping = tk.Button(
-            row1, text="PING", font=("Segoe UI", 8, "bold"),
-            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=8, pady=2,
+            row1, text="PING", font=("Segoe UI", 8),
+            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=6, pady=1,
             command=lambda: self.send_serial_command("PING")
         )
         btn_ping.pack(side=tk.LEFT)
 
         # Hàng 2: Tự động kết nối lại
         row2 = tk.Frame(card, bg=THEME["card"])
-        row2.pack(fill=tk.X, pady=(6, 0))
+        row2.pack(fill=tk.X, pady=(4, 0))
 
         chk_reconnect = tk.Checkbutton(
             row2,
@@ -221,255 +545,227 @@ class GroundStationApp:
         chk_reconnect.pack(side=tk.LEFT)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 2: GIÁM SÁT TELEMETRY XE CÂN BẰNG
+    # PANEL 3: GIÁM SÁT TELEMETRY XE CÂN BẰNG
     # ──────────────────────────────────────────────────────────────────────────
     def _build_telemetry_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📊 Giám Sát Trạng Thái & Telemetry (Real-time) ",
-            font=("Segoe UI", 10, "bold"),
+            text=" 📊 Giám Sát Trạng Thái & Telemetry ",
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
             relief=tk.SOLID,
             padx=10,
-            pady=8
+            pady=6
         )
-        card.pack(fill=tk.BOTH, expand=True)
+        card.pack(fill=tk.X, pady=(0, 6))
 
-        # Hàng 1: Trạng thái xe lớn (ARM / DISARM / FAULT)
+        # Hàng 1: Trạng thái xe lớn
         row_state = tk.Frame(card, bg=THEME["card"])
-        row_state.pack(fill=tk.X, pady=(0, 8))
+        row_state.pack(fill=tk.X, pady=(0, 6))
 
         self.lbl_robot_state = tk.Label(
             row_state,
             text="DISARMED",
-            font=("Segoe UI", 14, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg="#11111b",
             bg=THEME["warning"],
-            padx=14,
-            pady=4,
+            padx=10,
+            pady=2,
             relief=tk.FLAT
         )
-        self.lbl_robot_state.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.lbl_robot_state.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
         self.lbl_nrf_link = tk.Label(
             row_state,
             text="SÓNG NRF: CHỜ XE...",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["warning"],
             bg=THEME["card_alt"],
-            padx=10,
-            pady=4
+            padx=8,
+            pady=2
         )
         self.lbl_nrf_link.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-        # Hàng 2: Đo góc nghiêng Pitch & Thanh thủy chuẩn trực quan
-        tilt_card = tk.Frame(card, bg=THEME["card_alt"], padx=10, pady=8, relief=tk.GROOVE, bd=1)
-        tilt_card.pack(fill=tk.X, pady=(0, 8))
+        # Hàng 2: Đo góc nghiêng Pitch & Thanh thủy chuẩn
+        tilt_card = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=6, relief=tk.GROOVE, bd=1)
+        tilt_card.pack(fill=tk.X, pady=(0, 6))
 
         top_tilt = tk.Frame(tilt_card, bg=THEME["card_alt"])
         top_tilt.pack(fill=tk.X)
 
-        tk.Label(top_tilt, text="GÓC NGHIÊNG (PITCH):", font=("Segoe UI", 9, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT)
-        self.lbl_pitch_val = tk.Label(top_tilt, text="0.00°", font=("Segoe UI", 14, "bold"), fg=THEME["success"], bg=THEME["card_alt"])
+        tk.Label(top_tilt, text="GÓC PITCH:", font=("Segoe UI", 8, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT)
+        self.lbl_pitch_val = tk.Label(top_tilt, text="0.00°", font=("Segoe UI", 12, "bold"), fg=THEME["success"], bg=THEME["card_alt"])
         self.lbl_pitch_val.pack(side=tk.RIGHT)
 
-        # Thanh thủy chuẩn (Spirit Level Bar)
-        self.canvas_tilt = tk.Canvas(tilt_card, height=18, bg="#11111b", highlightthickness=0)
-        self.canvas_tilt.pack(fill=tk.X, pady=(6, 2))
+        self.canvas_tilt = tk.Canvas(tilt_card, height=14, bg="#11111b", highlightthickness=0)
+        self.canvas_tilt.pack(fill=tk.X, pady=(4, 0))
         self.canvas_tilt.bind("<Configure>", lambda e: self._draw_tilt_gauge())
 
-        # Hàng 3: Các chỉ số chi tiết (Tốc độ góc, Pin, Vật cản, Tốc độ lệnh)
+        # Hàng 3: Grid 4 ô chỉ số chi tiết
         grid_frame = tk.Frame(card, bg=THEME["card"])
-        grid_frame.pack(fill=tk.X, pady=(0, 8))
+        grid_frame.pack(fill=tk.X, pady=(0, 4))
 
-        # Ô 1: Tốc độ góc Gyro
-        b1 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=8, pady=6)
-        b1.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
-        tk.Label(b1, text="Tốc độ Gyro Rate", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_gyro_val = tk.Label(b1, text="0.0 °/s", font=("Segoe UI", 11, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
+        b1 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
+        b1.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        tk.Label(b1, text="Tốc độ Gyro", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
+        self.lbl_gyro_val = tk.Label(b1, text="0.0 °/s", font=("Segoe UI", 10, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
         self.lbl_gyro_val.pack(anchor="w")
 
-        # Ô 2: Điện áp Pin 4S
-        b2 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=8, pady=6)
-        b2.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
-        tk.Label(b2, text="Điện Áp Pin 4S", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_bat_val = tk.Label(b2, text="--.- V", font=("Segoe UI", 11, "bold"), fg=THEME["primary"], bg=THEME["card_alt"])
+        b2 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
+        b2.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+        tk.Label(b2, text="Pin 4S", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
+        self.lbl_bat_val = tk.Label(b2, text="--.- V", font=("Segoe UI", 10, "bold"), fg=THEME["primary"], bg=THEME["card_alt"])
         self.lbl_bat_val.pack(anchor="w")
 
-        # Ô 3: Vật cản phía trước
-        b3 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=8, pady=6)
-        b3.grid(row=1, column=0, sticky="nsew", padx=3, pady=3)
-        tk.Label(b3, text="Khoảng cách vật cản", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_dist_val = tk.Label(b3, text="-- cm", font=("Segoe UI", 11, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
+        b3 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
+        b3.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
+        tk.Label(b3, text="Vật cản", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
+        self.lbl_dist_val = tk.Label(b3, text="-- cm", font=("Segoe UI", 10, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
         self.lbl_dist_val.pack(anchor="w")
 
-        # Ô 4: Hướng & Lệnh lái đang gửi
-        b4 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=8, pady=6)
-        b4.grid(row=1, column=1, sticky="nsew", padx=3, pady=3)
-        tk.Label(b4, text="Lệnh Drive / Steer", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_cmd_val = tk.Label(b4, text="0 / 0 (STOP)", font=("Segoe UI", 11, "bold"), fg=THEME["accent"], bg=THEME["card_alt"])
+        b4 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
+        b4.grid(row=1, column=1, sticky="nsew", padx=2, pady=2)
+        tk.Label(b4, text="Drive / Steer", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
+        self.lbl_cmd_val = tk.Label(b4, text="0 / 0", font=("Segoe UI", 10, "bold"), fg=THEME["accent"], bg=THEME["card_alt"])
         self.lbl_cmd_val.pack(anchor="w")
 
         grid_frame.columnconfigure(0, weight=1)
         grid_frame.columnconfigure(1, weight=1)
 
-        # Hàng 4: Chẩn đoán phần cứng (Hardware Diagnostic Flags)
-        diag_box = tk.LabelFrame(card, text=" Chẩn đoán thiết bị phần cứng ", font=("Segoe UI", 8, "bold"), fg=THEME["subtext"], bg=THEME["card"], padx=6, pady=4)
-        diag_box.pack(fill=tk.X, pady=(4, 0))
-
-        self.lbl_diag_mpu = tk.Label(diag_box, text="[ MPU6050: ? ]", font=("Consolas", 8), fg=THEME["subtext"], bg=THEME["card"])
-        self.lbl_diag_mpu.pack(side=tk.LEFT, padx=4)
-
-        self.lbl_diag_nrf = tk.Label(diag_box, text="[ NRF24: ? ]", font=("Consolas", 8), fg=THEME["subtext"], bg=THEME["card"])
-        self.lbl_diag_nrf.pack(side=tk.LEFT, padx=4)
-
-        self.lbl_diag_pos = tk.Label(diag_box, text="[ DỰNG THẲNG: ? ]", font=("Consolas", 8), fg=THEME["subtext"], bg=THEME["card"])
-        self.lbl_diag_pos.pack(side=tk.LEFT, padx=4)
-
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 3: BẢNG ĐIỀU KHIỂN 8 HƯỚNG DI CHUYỂN (8-WAY D-PAD & SLIDERS)
+    # PANEL 4: BẢNG ĐIỀU KHIỂN 8 HƯỚNG DI CHUYỂN
     # ──────────────────────────────────────────────────────────────────────────
     def _build_controls_8way_panel(self, parent):
         card = tk.LabelFrame(
             parent,
             text=" 🎮 Bảng Lệnh Điều Khiển 8 Hướng (Joystick / D-Pad) ",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
             relief=tk.SOLID,
             padx=10,
-            pady=8
+            pady=6
         )
-        card.pack(fill=tk.X, pady=(0, 8))
+        card.pack(fill=tk.X, pady=(0, 6))
 
-        # Hàng 1: Nút hành động chính (ARM, DISARM, ESTOP)
+        # Nút trạng thái chính
         act_row = tk.Frame(card, bg=THEME["card"])
-        act_row.pack(fill=tk.X, pady=(0, 8))
+        act_row.pack(fill=tk.X, pady=(0, 6))
 
         btn_arm = tk.Button(
-            act_row, text="🟢 ARM XE (X)", font=("Segoe UI", 9, "bold"),
+            act_row, text="🟢 ARM (X)", font=("Segoe UI", 8, "bold"),
             bg="#2e7d32", fg="#ffffff", activebackground=THEME["success"],
-            relief=tk.FLAT, padx=8, pady=6, command=self.cmd_arm
+            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_arm
         )
         btn_arm.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
         btn_disarm = tk.Button(
-            act_row, text="🟡 DISARM (Z/V)", font=("Segoe UI", 9, "bold"),
+            act_row, text="🟡 DISARM (Z/V)", font=("Segoe UI", 8, "bold"),
             bg="#f57f17", fg="#11111b", activebackground=THEME["warning"],
-            relief=tk.FLAT, padx=8, pady=6, command=self.cmd_disarm
+            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_disarm
         )
         btn_disarm.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
         btn_estop = tk.Button(
-            act_row, text="🛑 DỪNG KHẨN (E)", font=("Segoe UI", 9, "bold"),
+            act_row, text="🛑 ESTOP (Esc)", font=("Segoe UI", 8, "bold"),
             bg="#c62828", fg="#ffffff", activebackground=THEME["danger"],
-            relief=tk.FLAT, padx=8, pady=6, command=self.cmd_estop
+            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_estop
         )
         btn_estop.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        # Hàng 2: Cụm 8 hướng di chuyển + Thanh trượt bước tốc độ
+        # Cụm 8 hướng di chuyển + Thanh trượt
         ctrl_split = tk.Frame(card, bg=THEME["card"])
-        ctrl_split.pack(fill=tk.X, pady=4)
+        ctrl_split.pack(fill=tk.X, pady=2)
 
-        # Cụm 3x3 D-Pad 8 hướng bên trái
-        dpad = tk.Frame(ctrl_split, bg=THEME["card_alt"], padx=8, pady=8, relief=tk.GROOVE, bd=1)
-        dpad.pack(side=tk.LEFT, padx=(0, 10))
+        dpad = tk.Frame(ctrl_split, bg=THEME["card_alt"], padx=6, pady=6, relief=tk.GROOVE, bd=1)
+        dpad.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Hàng 0: ↖ Tiến-Trái, ▲ Tiến, ↗ Tiến-Phải
-        btn_nw = tk.Button(dpad, text="↖ Q", width=6, font=("Segoe UI", 9, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_left)
+        btn_nw = tk.Button(dpad, text="↖ Q", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_left)
         btn_nw.grid(row=0, column=0, padx=2, pady=2)
 
-        btn_n = tk.Button(dpad, text="▲ W", width=8, font=("Segoe UI", 9, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd)
+        btn_n = tk.Button(dpad, text="▲ W", width=7, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd)
         btn_n.grid(row=0, column=1, padx=2, pady=2)
 
-        btn_ne = tk.Button(dpad, text="↗ E", width=6, font=("Segoe UI", 9, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_right)
+        btn_ne = tk.Button(dpad, text="↗ E", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_right)
         btn_ne.grid(row=0, column=2, padx=2, pady=2)
 
-        # Hàng 1: ◄ Trái, ■ STOP, ► Phải
-        btn_w = tk.Button(dpad, text="◄ A", width=6, font=("Segoe UI", 9, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_left)
+        btn_w = tk.Button(dpad, text="◄ A", width=5, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_left)
         btn_w.grid(row=1, column=0, padx=2, pady=2)
 
-        btn_stop = tk.Button(dpad, text="■ DỪNG", width=8, font=("Segoe UI", 9, "bold"), bg="#c62828", fg="#ffffff", relief=tk.FLAT, command=self.cmd_stop)
+        btn_stop = tk.Button(dpad, text="■ STOP", width=7, font=("Segoe UI", 8, "bold"), bg="#c62828", fg="#ffffff", relief=tk.FLAT, command=self.cmd_stop)
         btn_stop.grid(row=1, column=1, padx=2, pady=2)
 
-        btn_e = tk.Button(dpad, text="► D", width=6, font=("Segoe UI", 9, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_right)
+        btn_e = tk.Button(dpad, text="► D", width=5, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_right)
         btn_e.grid(row=1, column=2, padx=2, pady=2)
 
-        # Hàng 2: ↙ Lùi-Trái, ▼ Lùi, ↘ Lùi-Phải
-        btn_sw = tk.Button(dpad, text="↙ Z", width=6, font=("Segoe UI", 9, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_left)
+        btn_sw = tk.Button(dpad, text="↙ Z", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_left)
         btn_sw.grid(row=2, column=0, padx=2, pady=2)
 
-        btn_s = tk.Button(dpad, text="▼ S", width=8, font=("Segoe UI", 9, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd)
+        btn_s = tk.Button(dpad, text="▼ S", width=7, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd)
         btn_s.grid(row=2, column=1, padx=2, pady=2)
 
-        btn_se = tk.Button(dpad, text="↘ C", width=6, font=("Segoe UI", 9, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_right)
+        btn_se = tk.Button(dpad, text="↘ C", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_right)
         btn_se.grid(row=2, column=2, padx=2, pady=2)
 
-        # Cột điều chỉnh bước tốc độ bên phải
+        # Cột thanh trượt
         sliders = tk.Frame(ctrl_split, bg=THEME["card"])
         sliders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(sliders, text="Tốc độ Tiến/Lùi (Drive Step):", font=("Segoe UI", 8, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
+        tk.Label(sliders, text="Tốc độ Tiến/Lùi:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
         self.slider_speed_step = tk.Scale(
             sliders, from_=100, to=600, orient=tk.HORIZONTAL,
             bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
         )
         self.slider_speed_step.set(200)
-        self.slider_speed_step.pack(fill=tk.X, pady=(0, 6))
+        self.slider_speed_step.pack(fill=tk.X, pady=(0, 4))
 
-        tk.Label(sliders, text="Độ nhạy Rẽ/Quay (Steer Step):", font=("Segoe UI", 8, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
+        tk.Label(sliders, text="Độ nhạy Rẽ/Quay:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
         self.slider_steer_step = tk.Scale(
             sliders, from_=100, to=500, orient=tk.HORIZONTAL,
             bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
         )
         self.slider_steer_step.set(250)
-        self.slider_steer_step.pack(fill=tk.X, pady=(0, 6))
+        self.slider_steer_step.pack(fill=tk.X, pady=(0, 4))
 
-        # Nhãn hiển thị hướng di chuyển hiện tại
         self.lbl_active_direction = tk.Label(
-            sliders,
-            text="HƯỚNG: TĨNH (STOP)",
-            font=("Segoe UI", 10, "bold"),
-            fg=THEME["primary"],
-            bg=THEME["card_alt"],
-            pady=4
+            sliders, text="HƯỚNG: TĨNH (STOP)", font=("Segoe UI", 8, "bold"),
+            fg=THEME["primary"], bg=THEME["card_alt"], pady=2
         )
         self.lbl_active_direction.pack(fill=tk.X)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 4: TERMINAL CONSOLE & GỬI LỆNH TRỰC TIẾP
+    # PANEL 5: TERMINAL CONSOLE & GỬI LỆNH TRỰC TIẾP
     # ──────────────────────────────────────────────────────────────────────────
     def _build_console_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 💻 Terminal Console (Giao Tiếp ESP32 & NRF24) ",
-            font=("Segoe UI", 10, "bold"),
+            text=" 💻 Terminal Console ",
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
             relief=tk.SOLID,
-            padx=10,
-            pady=8
+            padx=8,
+            pady=6
         )
         card.pack(fill=tk.BOTH, expand=True)
 
-        # Khung văn bản hiển thị log
         log_frame = tk.Frame(card, bg=THEME["console_bg"])
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
         scrollbar = tk.Scrollbar(log_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.txt_console = tk.Text(
             log_frame,
-            height=10,
+            height=6,
             bg=THEME["console_bg"],
             fg="#a6e3a1",
             insertbackground="#ffffff",
-            font=("Consolas", 9),
+            font=("Consolas", 8),
             yscrollcommand=scrollbar.set,
             bd=0,
             relief=tk.FLAT
@@ -477,31 +773,29 @@ class GroundStationApp:
         self.txt_console.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.txt_console.yview)
 
-        # Cấu hình màu sắc thẻ text
         self.txt_console.tag_config("tx", foreground="#89b4fa")
         self.txt_console.tag_config("rx", foreground="#a6e3a1")
         self.txt_console.tag_config("err", foreground="#f38ba8")
         self.txt_console.tag_config("warn", foreground="#fab387")
         self.txt_console.tag_config("info", foreground="#cdd6f4")
 
-        # Hàng nhập lệnh thủ công
         in_frame = tk.Frame(card, bg=THEME["card"])
         in_frame.pack(fill=tk.X)
 
-        self.ent_cmd = tk.Entry(in_frame, font=("Consolas", 9), bg=THEME["card_alt"], fg=THEME["text"], insertbackground=THEME["text"], bd=1, relief=tk.SOLID)
-        self.ent_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=3)
+        self.ent_cmd = tk.Entry(in_frame, font=("Consolas", 8), bg=THEME["card_alt"], fg=THEME["text"], insertbackground=THEME["text"], bd=1, relief=tk.SOLID)
+        self.ent_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=2)
         self.ent_cmd.bind("<Return>", lambda e: self._send_manual_cmd())
 
         btn_send = tk.Button(
             in_frame, text="GỬI", font=("Segoe UI", 8, "bold"),
-            bg=THEME["primary"], fg="#11111b", relief=tk.FLAT, padx=12,
+            bg=THEME["primary"], fg="#11111b", relief=tk.FLAT, padx=8,
             command=self._send_manual_cmd
         )
-        btn_send.pack(side=tk.LEFT, padx=(0, 4))
+        btn_send.pack(side=tk.LEFT, padx=(0, 2))
 
         btn_clear = tk.Button(
             in_frame, text="XÓA", font=("Segoe UI", 8),
-            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=8,
+            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=6,
             command=self.clear_console
         )
         btn_clear.pack(side=tk.LEFT)
@@ -510,7 +804,7 @@ class GroundStationApp:
     # STATUS BAR (THANH TRẠNG THÁI CUỐI TRANG)
     # ──────────────────────────────────────────────────────────────────────────
     def _build_status_bar(self):
-        sb = tk.Frame(self.root, bg=THEME["panel"], height=24, padx=10)
+        sb = tk.Frame(self.root, bg=THEME["panel"], height=22, padx=10)
         sb.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.lbl_sb_port = tk.Label(sb, text="Port: CHƯA KẾT NỐI", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["panel"])
@@ -519,7 +813,7 @@ class GroundStationApp:
         self.lbl_sb_txrx = tk.Label(sb, text="TX: 0 | RX: 0", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["panel"])
         self.lbl_sb_txrx.pack(side=tk.LEFT, padx=(0, 15))
 
-        self.lbl_sb_mode = tk.Label(sb, text="Chế độ: 8-Way NRF Wireless Bridge", font=("Segoe UI", 8), fg=THEME["accent"], bg=THEME["panel"])
+        self.lbl_sb_mode = tk.Label(sb, text="8-Way NRF Wireless Bridge & Vision AI Active", font=("Segoe UI", 8), fg=THEME["accent"], bg=THEME["panel"])
         self.lbl_sb_mode.pack(side=tk.RIGHT)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -530,8 +824,7 @@ class GroundStationApp:
         self.root.bind("<space>", lambda e: self.cmd_stop())
 
     def _on_key_press(self, event):
-        # Tránh can thiệp khi đang gõ phím vào ô nhập text
-        if event.widget == self.ent_cmd:
+        if event.widget == self.ent_cmd or event.widget == self.cb_stream_url:
             return
 
         k = event.keysym.lower()
@@ -575,7 +868,7 @@ class GroundStationApp:
         self.drive_cmd = 0
         self.steer_cmd = 0
         self.send_serial_command("ESTOP")
-        self.lbl_active_direction.config(text="LỆNH: 🛑 DỪNG KHẨN CẤP")
+        self.lbl_active_direction.config(text="LỆNH: 🛑 DỪNG KHẨN")
 
     def cmd_stop(self):
         self.drive_cmd = 0
@@ -689,11 +982,9 @@ class GroundStationApp:
 
             self._log_console(f"[HỆ THỐNG] Đã mở cổng {port} @ 115200 baud.", "info")
 
-            # Tạo luồng nhận dữ liệu
             self.serial_thread = threading.Thread(target=self._serial_reader_thread, daemon=True)
             self.serial_thread.start()
 
-            # Gửi lệnh PING kiểm tra
             self.root.after(200, lambda: self.send_serial_command("PING"))
 
         except Exception as e:
@@ -753,7 +1044,6 @@ class GroundStationApp:
             self.root.after(0, self._disconnect_serial)
 
     def _process_rx_line(self, line):
-        # In vào console
         tag = "rx"
         if "LỖI" in line or "ERR" in line:
             tag = "err"
@@ -763,7 +1053,6 @@ class GroundStationApp:
             tag = "rx"
         self._log_console(line, tag)
 
-        # Phân tích cú pháp trạng thái sóng NRF
         if "SÓNG TỐT" in line or "KẾT NỐI TỐT" in line:
             self.nrf_link_ok = True
             self.lbl_nrf_link.config(text="SÓNG NRF: 🟢 ĐÃ KẾT NỐI (AUTO-ACK)", fg=THEME["success"])
@@ -774,8 +1063,6 @@ class GroundStationApp:
             self.nrf_link_ok = False
             self.lbl_nrf_link.config(text="SÓNG NRF: 🔴 LỖI PHẦN CỨNG", fg=THEME["danger"])
 
-        # Phân tích chuỗi Telemetry nếu có (Ví dụ JSON hoặc ACK định dạng)
-        # Format chuẩn: "pitch": 1.25, "rate": -0.8, "target": 0.0, "state": "ARMED", "vbat": 15.2
         if "pitch" in line.lower() or "vbat" in line.lower():
             m_pitch = re.search(r'"?pitch"?\s*:\s*([-+]?\d*\.?\d+)', line, re.I)
             if m_pitch:
@@ -798,7 +1085,7 @@ class GroundStationApp:
                 self.dist_cm = int(m_dist.group(1))
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VÒNG LẶP CẬP NHẬT GIAO DIỆN ĐỊNH KỲ (25 Hz)
+    # VÒNG LẶP CẬP NHẬT GIAO DIỆN & RENDER VIDEO (30 FPS)
     # ──────────────────────────────────────────────────────────────────────────
     def _ui_periodic_update(self):
         # 1. Cập nhật đồng hồ hệ thống
@@ -815,22 +1102,49 @@ class GroundStationApp:
 
         self.lbl_cmd_val.config(text=f"{self.drive_cmd} / {self.steer_cmd}")
 
-        # Đổi màu trạng thái ARM / DISARM
         if self.robot_state_str == "ARMED":
-            self.lbl_robot_state.config(text="ARMED (ĐANG CÂN BẰNG)", bg=THEME["success"], fg="#11111b")
+            self.lbl_robot_state.config(text="ARMED (CÂN BẰNG)", bg=THEME["success"], fg="#11111b")
         elif self.robot_state_str == "FAULT":
-            self.lbl_robot_state.config(text="FAULT (LỖI/NGÃ XE)", bg=THEME["danger"], fg="#ffffff")
+            self.lbl_robot_state.config(text="FAULT (NGÃ XE)", bg=THEME["danger"], fg="#ffffff")
         else:
             self.lbl_robot_state.config(text=self.robot_state_str, bg=THEME["warning"], fg="#11111b")
 
-        # Cập nhật thanh thủy chuẩn góc nghiêng
         self._draw_tilt_gauge()
-
-        # 3. Cập nhật Status Bar
         self.lbl_sb_txrx.config(text=f"TX: {self.tx_count} | RX: {self.rx_count}")
 
-        # Lặp lại sau 40 ms
-        self.root.after(40, self._ui_periodic_update)
+        # 3. Render khung hình Video ESP32-CAM và Xử lý AI Vision
+        if self.current_frame is not None:
+            try:
+                frame_to_show = self.current_frame.copy()
+
+                # Đưa qua Pipeline AI Thị Giác Máy Tính
+                frame_to_show = self._process_ai_vision(frame_to_show)
+
+                h_can = self.video_canvas.winfo_height()
+                w_can = self.video_canvas.winfo_width()
+
+                if w_can > 50 and h_can > 50:
+                    orig_h, orig_w = frame_to_show.shape[:2]
+                    scale = min(w_can / orig_w, h_can / orig_h)
+                    new_w = max(1, int(orig_w * scale))
+                    new_h = max(1, int(orig_h * scale))
+
+                    resized = cv2.resize(frame_to_show, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(rgb_frame)
+                    self.photo_img = ImageTk.PhotoImage(image=pil_img)
+
+                    self.video_canvas.delete("all")
+                    pos_x = (w_can - new_w) // 2
+                    pos_y = (h_can - new_h) // 2
+                    self.video_canvas.create_image(pos_x, pos_y, anchor=tk.NW, image=self.photo_img)
+
+                    self.lbl_fps.config(text=f"FPS: {self.fps_display:.1f} | Phân giải: {orig_w}x{orig_h}")
+            except Exception:
+                pass
+
+        # Lặp lại sau 33 ms (~30 FPS)
+        self.root.after(33, self._ui_periodic_update)
 
     def _draw_tilt_gauge(self):
         w = self.canvas_tilt.winfo_width()
@@ -841,10 +1155,7 @@ class GroundStationApp:
         self.canvas_tilt.delete("all")
         cx = w // 2
 
-        # Vạch tâm cân bằng
         self.canvas_tilt.create_line(cx, 0, cx, h, fill="#6c7086", width=2)
-
-        # Vị trí con trỏ góc nghiêng (-15° .. +15°)
         clamped_pitch = max(-15.0, min(15.0, self.pitch_deg))
         indicator_x = cx + int((clamped_pitch / 15.0) * (w / 2 - 4))
 
@@ -857,6 +1168,12 @@ class GroundStationApp:
 
     def clear_console(self):
         self.txt_console.delete("1.0", tk.END)
+
+    def on_closing(self):
+        if messagebox.askokcancel("Thoát", "Bạn có chắc muốn đóng Ground Control Station?"):
+            self.stop_video_stream()
+            self._disconnect_serial()
+            self.root.destroy()
 
 
 def main():
