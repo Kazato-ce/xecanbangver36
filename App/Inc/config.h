@@ -55,12 +55,12 @@
  * Control System / Balance PID Gains (Placeholder - TODO Tune)
  * ==================================================================== */
 /* TODO tune: Người dùng thay thế hệ số từ mô phỏng */
-#define PID_ANGLE_KP                19.0f          /* Độ nhạy góc nghiêng (giảm nhẹ để triệt tiêu tiếng rít) */
+#define PID_ANGLE_KP                25.0f          /* Độ nhạy góc nghiêng (giảm nhẹ để triệt tiêu tiếng rít) */
 #define PID_ANGLE_KD                1.36f         /* Giảm chấn theo tốc độ góc (giảm từ 0.85 để hết tiếng ré cao tần) */
 #define PID_ANGLE_KI                0.0f          /* Tích phân góc nghiêng */
 
 #define PID_SPEED_KP                0.35f         /* Vòng ngoài điều khiển vận tốc xe */
-#define PID_SPEED_KI                0.02f         /* Tích phân vận tốc */
+#define PID_SPEED_KI                0.55f         /* Tích phân vận tốc */
 
 #define PID_STEER_KP                1.2f          /* Hệ số quay xe */
 

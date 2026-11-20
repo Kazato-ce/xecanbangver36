@@ -1,21 +1,29 @@
 /**
  * @file ESP32_DevKit_NRF24.ino
- * @brief Firmware USB Serial ↔ NRF24L01 Dongle Bridge cho ESP32 DevKit V1:
- *        - Đóng vai trò là Cầu nối không dây (Wireless Dongle) kết nối trực tiếp với Máy tính qua cổng USB COM
- *        - Giao tiếp siêu tốc (115200 baud) với Ứng dụng Python Ground Control Station (App_python/app.py)
- *        - Truyền lệnh điều khiển (ARM, DISARM, Tiến/Lùi, Rẽ, Dừng khẩn cấp) sang STM32F405 qua NRF24L01
- *        - KHÔNG BẬT WIFI / WEB SERVER: Triệt tiêu 100% can nhiễu 2.4GHz với NRF24L01 và tối ưu độ trễ (latency < 2ms)
+ * @brief Firmware USB Serial COM & NRF24L01 Dongle Bridge tích hợp Cần gạt Joystick 2 trục:
+ *        - Đóng vai trò là Cầu nối không dây (Wireless Dongle) kết nối trực tiếp với Máy tính (App Python)
+ *        - ĐỒNG THỜI tích hợp Cần gạt Joystick 2 trục + Nút nhấn: Cho phép điều khiển xe độc lập khi KHÔNG CÓ MÁY TÍNH
+ *        - Hỗ trợ đầy đủ 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải, Lùi-Trái, Lùi-Phải
+ *        - Tối ưu hóa chu kỳ phát sóng 20ms (50 Hz) và phát tức thời khi có lệnh/sự kiện (< 2ms delay)
+ *        - Cơ chế Hardware Auto-ACK đảm bảo độ tin cậy và chống nghẽn đường truyền
  *
- * Sơ đồ đấu dây giữa NRF24L01 và ESP32 DevKit V1:
+ * Sơ đồ đấu nối giữa NRF24L01 và ESP32 DevKit V1:
  *   NRF24L01        ESP32 DevKit V1
- *     VCC    ----->  3.3V (Bắt buộc thêm tụ 10uF - 47uF giữa VCC và GND)
+ *     VCC    ----->  3.3V (Khuyến nghị thêm tụ 10uF - 47uF giữa VCC và GND)
  *     GND    ----->  GND
  *     CE     ----->  GPIO 4
  *     CSN    ----->  GPIO 5
  *     SCK    ----->  GPIO 18
  *     MOSI   ----->  GPIO 23
  *     MISO   ----->  GPIO 19
- *     IRQ    ----->  Không nối
+ *
+ * Sơ đồ đấu nối Cần gạt Joystick 2 trục (Analog PS2 Joystick Module):
+ *   Joystick        ESP32 DevKit V1
+ *     VCC    ----->  3.3V (Bắt buộc dùng 3.3V để điện áp ADC không vượt ngưỡng)
+ *     GND    ----->  GND
+ *     VRX    ----->  GPIO 34 (Trục Tiến / Lùi - Input Only, ADC1_CH6)
+ *     VRY    ----->  GPIO 35 (Trục Bẻ Lái Trái/Phải - Input Only, ADC1_CH7)
+ *     SW     ----->  GPIO 32 (Nút bấm ấn trục xuống: ARM / DISARM / ESTOP)
  */
 
 #include <SPI.h>
@@ -32,6 +40,9 @@
   #define PIN_SCK                 12
   #define PIN_MISO                13
   #define PIN_MOSI                11
+  #define PIN_JOY_VRX             1     // ADC1_CH0
+  #define PIN_JOY_VRY             2     // ADC1_CH1
+  #define PIN_JOY_SW              4     // Nút nhấn
 #elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV) || defined(ESP32C3)
   #define PIN_CE                  4
   #define PIN_CSN                 5
@@ -39,19 +50,31 @@
   #define PIN_SCK                 6
   #define PIN_MISO                7
   #define PIN_MOSI                10
+  #define PIN_JOY_VRX             0     // ADC1_CH0
+  #define PIN_JOY_VRY             1     // ADC1_CH1
+  #define PIN_JOY_SW              2     // Nút nhấn
 #else
+  // Cấu hình chuẩn ESP32 DevKit V1 (30 chân / 36 chân WROOM-32)
   #define PIN_CE                  4
   #define PIN_CSN                 5
   #define PIN_LED                 2     // Đèn LED tích hợp trên board ESP32 DevKit
   #define PIN_SCK                 18
   #define PIN_MISO                19
   #define PIN_MOSI                23
+  #define PIN_JOY_VRX             34    // Trục Tiến / Lùi (VRX nối GPIO 34)
+  #define PIN_JOY_VRY             35    // Trục Bẻ Lái (VRY nối GPIO 35)
+  #define PIN_JOY_SW              32    // Nút bấm ấn trục Joystick (SW nối GPIO 32)
 #endif
 
-#define RADIO_CHANNEL           76    // Kênh RF 2476 MHz (khớp với STM32)
-#define CONTROL_INTERVAL_MS     40    // Gửi lệnh mỗi 40 ms (25 Hz)
+// Tùy chọn đảo chiều nếu người dùng lắp ngược hướng cần gạt Joystick
+#define JOY_INVERT_DRIVE        false   // Đặt true nếu gạt tới xe bị lùi
+#define JOY_INVERT_STEER        false   // Đặt true nếu gạt phải xe rẽ trái
+#define JOY_DEADBAND            220     // Vùng chết chống trôi lò xo (~ +-220 trên thang 4096)
 
-// Khởi tạo RF24 với tần số SPI 4 MHz (tối ưu độ ổn định khi cắm dây breadboard)
+#define RADIO_CHANNEL           76      // Kênh RF 2476 MHz (khớp với STM32)
+#define CONTROL_INTERVAL_MS     20      // 50 Hz (20 ms) - Siêu mượt và tức thời!
+
+// Khởi tạo RF24 với tần số SPI 4 MHz
 RF24 radio(PIN_CE, PIN_CSN, 4000000);
 
 // Địa chỉ pipe giao tiếp 5 byte (khớp với STM32)
@@ -62,29 +85,83 @@ static RadioPacket_t txPacket;
 static uint16_t s_seq = 0;
 static uint32_t s_last_tx_ms = 0;
 static bool s_radio_ok = false;
+static bool s_force_tx_immediate = false;
 
 // Trạng thái điều khiển hiện tại
-static int16_t s_current_drive = 0;   // -1000..1000
-static int16_t s_current_steer = 0;   // -1000..1000
+static int16_t s_current_drive = 0;     // -1000..1000
+static int16_t s_current_steer = 0;     // -1000..1000
 static ProtocolCmd_t s_pending_cmd = CMD_DISARM;
 static uint8_t s_consecutive_fails = 0;
 
+// Trạng thái Joystick
+static bool s_joystick_detected = false;
+static int  s_joy_center_x = 2048;
+static int  s_joy_center_y = 2048;
+static bool s_joy_active = false;
+static uint32_t s_sw_press_time_ms = 0;
+static bool s_sw_last_state = HIGH;
+
 static String s_serial_rx = "";
 
+const char* get_direction_8way(int drive, int steer) {
+  if (abs(drive) < 100 && abs(steer) < 100) return "TĨNH (STOP)";
+  if (drive > 150 && abs(steer) < 150) return "▲ TIẾN THẲNG";
+  if (drive < -150 && abs(steer) < 150) return "▼ LÙI THẲNG";
+  if (abs(drive) < 150 && steer < -150) return "◄ QUAY TRÁI";
+  if (abs(drive) < 150 && steer > 150) return "► QUAY PHẢI";
+  if (drive > 100 && steer < -100) return "↖ TIẾN - CHÉO TRÁI";
+  if (drive > 100 && steer > 100) return "↗ TIẾN - CHÉO PHẢI";
+  if (drive < -100 && steer < -100) return "↙ LÙI - CHÉO TRÁI";
+  if (drive < -100 && steer > 100) return "↘ LÙI - CHÉO PHẢI";
+  return "DI CHUYỂN";
+}
+
 void printMenu(void) {
-  Serial.println("\n==================================================");
-  Serial.println("  ESP32 DevKit V1 ↔ NRF24L01 Ground Station Dongle");
-  Serial.println("==================================================");
-  Serial.println("Giao diện kết nối USB Serial (115200 baud) cho App Python:");
-  Serial.println("  'PING'      : Kiểm tra trạng thái Dongle (trả về PONG)");
-  Serial.println("  'ARM' / 'X' : ARM xe (cho phép cân bằng)");
-  Serial.println("  'DISARM'/'Z': DISARM xe (tắt động cơ)");
-  Serial.println("  'ESTOP'/'E' : DỪNG KHẨN CẤP");
-  Serial.println("  'DRIVE X Y' : Đặt tốc độ tiến lùi X (-1000..1000) và bẻ lái Y (-1000..1000)");
-  Serial.println("  'w' / 's'   : Tăng / giảm tốc độ tiến lùi (+-150)");
-  Serial.println("  'a' / 'd'   : Rẽ trái / rẽ phải (+-200)");
-  Serial.println("  ' ' (Space) : Phanh về tốc độ 0");
-  Serial.println("==================================================\n");
+  Serial.println("\n========================================================");
+  Serial.println("  ESP32 DevKit V1 ↔ NRF24L01 Dongle & 8-Way Joystick");
+  Serial.println("========================================================");
+  Serial.println("1. Kết nối Cần gạt Joystick (Điều khiển khi không có PC):");
+  Serial.println("   - VRX  -> GPIO 34 (Tiến / Lùi)");
+  Serial.println("   - VRY  -> GPIO 35 (Bẻ Lái Trái / Phải)");
+  Serial.println("   - SW   -> GPIO 32 (Ấn ngắn: ARM/DISARM | Ấn giữ 1.2s: ESTOP)");
+  Serial.println("2. Lệnh qua USB Serial COM (115200 baud cho App Python):");
+  Serial.println("   'ARM' / 'X' : ARM xe (bật cân bằng)");
+  Serial.println("   'DISARM'/'Z': DISARM xe (tắt động cơ)");
+  Serial.println("   'ESTOP'/'E' : DỪNG KHẨN CẤP");
+  Serial.println("   'DRIVE X Y' : Đặt tốc độ X (-1000..1000) và bẻ lái Y (-1000..1000)");
+  Serial.println("   'w' / 's'   : Tiến / Lùi");
+  Serial.println("   'a' / 'd'   : Rẽ Trái / Rẽ Phải");
+  Serial.println("   'q' / 'e'   : Tiến-Trái / Tiến-Phải (Đi chéo)");
+  Serial.println("   'z' / 'c'   : Lùi-Trái  / Lùi-Phải  (Đi chéo)");
+  Serial.println("   ' ' (Space) : Phanh dừng tốc độ 0");
+  Serial.println("   'JOY CAL'   : Hiệu chuẩn lại tâm Joystick");
+  Serial.println("========================================================\n");
+}
+
+void calibrateJoystick(void) {
+  long sum_x = 0;
+  long sum_y = 0;
+  const int SAMPLES = 32;
+
+  for (int i = 0; i < SAMPLES; i++) {
+    sum_x += analogRead(PIN_JOY_VRX);
+    sum_y += analogRead(PIN_JOY_VRY);
+    delay(5);
+  }
+
+  int avg_x = sum_x / SAMPLES;
+  int avg_y = sum_y / SAMPLES;
+
+  // Nếu chân cắm hở (floating) thường ra 0 hoặc 4095
+  if (avg_x > 1200 && avg_x < 2800 && avg_y > 1200 && avg_y < 2800) {
+    s_joystick_detected = true;
+    s_joy_center_x = avg_x;
+    s_joy_center_y = avg_y;
+    Serial.printf("[JOYSTICK 🟢] Đã nhận diện Cần gạt Joystick! Tâm chuẩn: X=%d, Y=%d\n", avg_x, avg_y);
+  } else {
+    s_joystick_detected = false;
+    Serial.printf("[JOYSTICK ℹ️] Không phát hiện Joystick (X=%d, Y=%d) -> Sử dụng USB Serial COM làm kênh chính.\n", avg_x, avg_y);
+  }
 }
 
 void setup() {
@@ -92,79 +169,67 @@ void setup() {
   delay(100);
 
   pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_JOY_SW, INPUT_PULLUP);
 
-  // 1. Chớp LED xanh 3 lần xác nhận ESP32 khởi động tốt
+  // Chớp LED xác nhận khởi động
   for (int i = 0; i < 3; i++) {
     digitalWrite(PIN_LED, HIGH);
-    delay(100);
+    delay(80);
     digitalWrite(PIN_LED, LOW);
-    delay(100);
+    delay(80);
   }
 
   printMenu();
 
-  // Cấu hình trước mức logic chân CE và CSN
+  // Hiệu chuẩn Joystick
+  calibrateJoystick();
+
+  // Cấu hình chân CE và CSN cho NRF24
   pinMode(PIN_CSN, OUTPUT);
   digitalWrite(PIN_CSN, HIGH);
   pinMode(PIN_CE, OUTPUT);
   digitalWrite(PIN_CE, LOW);
-  delay(100);
+  delay(50);
 
-  // Khởi tạo SPI cứng trên ESP32
+  // Khởi tạo SPI cứng
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
   delay(50);
 
   // Thử khởi động module NRF24L01
   bool ok = radio.begin(&SPI);
 
-  // Kiểm tra thanh ghi STATUS thô qua lệnh NOP 0xFF
+  // Kiểm tra thanh ghi STATUS thô qua NOP
   digitalWrite(PIN_CSN, LOW);
   delayMicroseconds(10);
   uint8_t raw_status = SPI.transfer(0xFF);
   digitalWrite(PIN_CSN, HIGH);
 
-  Serial.printf("[KIỂM TRA PHẦN CỨNG] Mã STATUS SPI NRF24: 0x%02X\n", raw_status);
+  Serial.printf("[KIỂM TRA SPI] STATUS NRF24: 0x%02X\n", raw_status);
 
   if (!ok && raw_status != 0x00 && raw_status != 0xFF) {
-    Serial.println("  -> [THÀNH CÔNG] Chip NRF24/Si24R1 phản hồi SPI tốt.");
     ok = true;
   }
 
   if (!ok) {
-    Serial.println("\n[LỖI] radio.begin() thất bại!");
+    Serial.println("\n[LỖI 🔴] radio.begin() thất bại! Kiểm tra chân SPI NRF24.");
     s_radio_ok = false;
-    if (raw_status == 0x00) {
-      Serial.println("  [CHẨN ĐOÁN: 0x00] Chân MISO chạm mass hoặc mất xung SCK / cắm ngược hàng chân.");
-    } else if (raw_status == 0xFF) {
-      Serial.println("  [CHẨN ĐOÁN: 0xFF] Module NRF24L01 chưa có nguồn 3.3V hoặc đứt dây GND.");
-    }
-    // Chớp LED SOS nhanh báo lỗi
-    for (int i = 0; i < 6; i++) {
-      digitalWrite(PIN_LED, HIGH);
-      delay(80);
-      digitalWrite(PIN_LED, LOW);
-      delay(80);
-    }
   } else {
     s_radio_ok = true;
     radio.setChannel(RADIO_CHANNEL);
     radio.setDataRate(RF24_1MBPS);
-    radio.setPALevel(RF24_PA_LOW);   // Dùng PA_LOW tránh bão hòa LNA khi để gần và chống sụt áp 3.3V
-    radio.setAutoAck(true);          // Bật Enhanced ShockBurst Auto-Ack chuẩn
-    radio.setRetries(5, 15);         // Delay 1500us, thử lại 15 lần tối đa
-    radio.setPayloadSize(sizeof(RadioPacket_t)); // 17 bytes tĩnh
+    radio.setPALevel(RF24_PA_LOW);
+    radio.setAutoAck(true);
+    radio.setRetries(2, 4);                     // Delay 750us, thử lại 4 lần (~3ms max) -> chống nghẽn delay!
+    radio.setPayloadSize(sizeof(RadioPacket_t)); // 17 bytes cố định
 
-    // Mở pipe ghi sang STM32
     radio.openWritingPipe(RADIO_ADDR);
-    radio.stopListening();           // Chế độ phát (Transmitter)
+    radio.stopListening();                      // Chế độ phát (Transmitter)
 
-    // Bật LED xanh 1 giây xác nhận phần cứng NRF24 sẵn sàng
     digitalWrite(PIN_LED, HIGH);
-    delay(1000);
+    delay(500);
     digitalWrite(PIN_LED, LOW);
 
-    Serial.println("[OK] NRF24L01 ĐÃ SẴN SÀNG TRUYỀN TIN (Kênh 76 @ 1Mbps, PA_LOW)!");
-    Serial.println("[READY] ESP32 Dongle đã sẵn sàng nhận lệnh từ App Python!\n");
+    Serial.println("[OK 🟢] Sóng NRF24L01 sẵn sàng (Kênh 76 @ 1Mbps, 50Hz, Auto-ACK)!\n");
   }
 }
 
@@ -174,16 +239,19 @@ void processCommandLine(String line) {
 
   if (line.equalsIgnoreCase("ARM") || line.equalsIgnoreCase("X")) {
     s_pending_cmd = CMD_ARM;
+    s_force_tx_immediate = true;
     Serial.println("ACK: ARM");
   } else if (line.equalsIgnoreCase("DISARM") || line.equalsIgnoreCase("Z")) {
     s_pending_cmd = CMD_DISARM;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_force_tx_immediate = true;
     Serial.println("ACK: DISARM");
   } else if (line.equalsIgnoreCase("ESTOP") || line.equalsIgnoreCase("E")) {
     s_pending_cmd = CMD_ESTOP;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_force_tx_immediate = true;
     Serial.println("ACK: ESTOP");
   } else if (line.startsWith("DRIVE ") || line.startsWith("drive ")) {
     int spd = 0, str = 0;
@@ -192,40 +260,173 @@ void processCommandLine(String line) {
       s_current_drive = constrain(spd, -1000, 1000);
       s_current_steer = (n >= 2) ? constrain(str, -1000, 1000) : 0;
       s_pending_cmd = CMD_DRIVE;
-      Serial.printf("ACK: DRIVE %d %d\n", s_current_drive, s_current_steer);
+      s_force_tx_immediate = true;
+      Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
     }
   } else if (line == "w" || line == "W") {
     s_pending_cmd = CMD_DRIVE;
-    s_current_drive = constrain(s_current_drive + 150, -1000, 1000);
-    Serial.printf("ACK: DRIVE %d %d\n", s_current_drive, s_current_steer);
+    s_current_drive = constrain(s_current_drive + 200, -1000, 1000);
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "s" || line == "S") {
     s_pending_cmd = CMD_DRIVE;
-    s_current_drive = constrain(s_current_drive - 150, -1000, 1000);
-    Serial.printf("ACK: DRIVE %d %d\n", s_current_drive, s_current_steer);
+    s_current_drive = constrain(s_current_drive - 200, -1000, 1000);
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "a" || line == "A") {
     s_pending_cmd = CMD_DRIVE;
-    s_current_steer = constrain(s_current_steer - 200, -1000, 1000);
-    Serial.printf("ACK: DRIVE %d %d\n", s_current_drive, s_current_steer);
+    s_current_steer = constrain(s_current_steer - 250, -1000, 1000);
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "d" || line == "D") {
     s_pending_cmd = CMD_DRIVE;
-    s_current_steer = constrain(s_current_steer + 200, -1000, 1000);
-    Serial.printf("ACK: DRIVE %d %d\n", s_current_drive, s_current_steer);
+    s_current_steer = constrain(s_current_steer + 250, -1000, 1000);
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
+  } else if (line == "q" || line == "Q") {
+    // ↖ Tiến - Chéo Trái
+    s_pending_cmd = CMD_DRIVE;
+    s_current_drive = 300;
+    s_current_steer = -250;
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE ↖ TIẾN-TRÁI (%d, %d)\n", s_current_drive, s_current_steer);
+  } else if (line == "e" || line == "E_DRIVE") {
+    // ↗ Tiến - Chéo Phải
+    s_pending_cmd = CMD_DRIVE;
+    s_current_drive = 300;
+    s_current_steer = 250;
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE ↗ TIẾN-PHẢI (%d, %d)\n", s_current_drive, s_current_steer);
+  } else if (line == "z" || line == "Z_DRIVE") {
+    // ↙ Lùi - Chéo Trái
+    s_pending_cmd = CMD_DRIVE;
+    s_current_drive = -300;
+    s_current_steer = -250;
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE ↙ LÙI-TRÁI (%d, %d)\n", s_current_drive, s_current_steer);
+  } else if (line == "c" || line == "C") {
+    // ↘ Lùi - Chéo Phải
+    s_pending_cmd = CMD_DRIVE;
+    s_current_drive = -300;
+    s_current_steer = 250;
+    s_force_tx_immediate = true;
+    Serial.printf("ACK: DRIVE ↘ LÙI-PHẢI (%d, %d)\n", s_current_drive, s_current_steer);
   } else if (line == " " || line == "r" || line == "R") {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_force_tx_immediate = true;
     Serial.println("ACK: STOP");
+  } else if (line.equalsIgnoreCase("JOY CAL")) {
+    calibrateJoystick();
   } else if (line.equalsIgnoreCase("PING")) {
-    Serial.println("PONG: MODE=BRIDGE, RADIO_OK=1");
+    Serial.println("PONG: MODE=BRIDGE_JOYSTICK, RADIO_OK=1");
   } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("CHECK")) {
-    const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
-    Serial.println("\n--- [TRẠNG THÁI ESP32 DONGLE BRIDGE] ---");
-    Serial.printf(" 1. NRF24L01 Phần cứng : %s (Kênh 76 @ 1Mbps, PA_LOW)\n", s_radio_ok ? "🟢 SẴN SÀNG" : "🔴 LỖI SPI PHẦN CỨNG");
-    Serial.printf(" 2. Liên kết xe STM32   : %s\n", (s_consecutive_fails < 4) ? "🟢 ĐÃ KẾT NỐI (Auto-ACK OK)" : "🟡 ĐANG TÌM XE (Chờ STM32 bật nguồn)");
-    Serial.printf(" 3. Lệnh đang gửi       : %s | Tốc độ: %d | Bẻ lái: %d | Số gói: #%u\n", cmd_str, s_current_drive, s_current_steer, s_seq);
-    Serial.println("----------------------------------------\n");
+    Serial.println("\n--- [TRẠNG THÁI ESP32 DONGLE & JOYSTICK] ---");
+    Serial.printf(" 1. NRF24L01 Phần cứng : %s (Kênh 76 @ 1Mbps)\n", s_radio_ok ? "🟢 SẴN SÀNG" : "🔴 LỖI SPI");
+    Serial.printf(" 2. Sóng xe STM32       : %s\n", (s_consecutive_fails < 4) ? "🟢 ĐÃ KẾT NỐI (Auto-ACK OK)" : "🟡 CHỜ XE BẬT NGUỒN");
+    Serial.printf(" 3. Cần gạt Joystick   : %s (X_center=%d, Y_center=%d)\n", s_joystick_detected ? "🟢 ĐANG BẬT" : "⚪ CHƯA KẾT NỐI", s_joy_center_x, s_joy_center_y);
+    Serial.printf(" 4. Hướng & Lệnh       : %s | Tốc độ=%d | Bẻ lái=%d\n", get_direction_8way(s_current_drive, s_current_steer), s_current_drive, s_current_steer);
+    Serial.println("--------------------------------------------\n");
   } else if (line == "?") {
     printMenu();
+  }
+}
+
+void handleJoystick(void) {
+  if (!s_joystick_detected) return;
+
+  // 1. Xử lý nút nhấn SW của Joystick (GPIO 32)
+  bool sw_state = digitalRead(PIN_JOY_SW);
+  uint32_t now = millis();
+
+  if (sw_state == LOW && s_sw_last_state == HIGH) {
+    // Bắt đầu ấn nút
+    s_sw_press_time_ms = now;
+  } else if (sw_state == HIGH && s_sw_last_state == LOW) {
+    // Nhả nút
+    uint32_t press_duration = now - s_sw_press_time_ms;
+    if (press_duration >= 50 && press_duration < 1000) {
+      // Ấn ngắn: Đổi trạng thái ARM <-> DISARM
+      if (s_pending_cmd == CMD_ARM || s_pending_cmd == CMD_DRIVE) {
+        s_pending_cmd = CMD_DISARM;
+        s_current_drive = 0;
+        s_current_steer = 0;
+        Serial.println("[NÚT JOYSTICK] -> DISARM XE (Tắt động cơ)");
+      } else {
+        s_pending_cmd = CMD_ARM;
+        Serial.println("[NÚT JOYSTICK] -> ARM XE (Bật cân bằng)");
+      }
+      s_force_tx_immediate = true;
+    } else if (press_duration >= 1000) {
+      // Ấn giữ > 1 giây: DỪNG KHẨN CẤP
+      s_pending_cmd = CMD_ESTOP;
+      s_current_drive = 0;
+      s_current_steer = 0;
+      s_force_tx_immediate = true;
+      Serial.println("[NÚT JOYSTICK] -> DỪNG KHẨN CẤP (ESTOP)!");
+    }
+  }
+  s_sw_last_state = sw_state;
+
+  // 2. Đọc 4 mẫu analog để triệt tiêu nhiễu jitter ADC
+  int raw_x = 0, raw_y = 0;
+  for (int i = 0; i < 4; i++) {
+    raw_x += analogRead(PIN_JOY_VRX);
+    raw_y += analogRead(PIN_JOY_VRY);
+  }
+  raw_x /= 4;
+  raw_y /= 4;
+
+  int diff_x = raw_x - s_joy_center_x; // Trục Tiến / Lùi
+  int diff_y = raw_y - s_joy_center_y; // Trục Bẻ Lái
+
+  if (JOY_INVERT_DRIVE) diff_x = -diff_x;
+  if (JOY_INVERT_STEER) diff_y = -diff_y;
+
+  int joy_drive = 0;
+  int joy_steer = 0;
+
+  if (abs(diff_x) > JOY_DEADBAND) {
+    if (diff_x > 0) {
+      joy_drive = map(diff_x, JOY_DEADBAND, 2048, 0, 1000);
+    } else {
+      joy_drive = map(diff_x, -JOY_DEADBAND, -2048, 0, -1000);
+    }
+  }
+
+  if (abs(diff_y) > JOY_DEADBAND) {
+    if (diff_y > 0) {
+      joy_steer = map(diff_y, JOY_DEADBAND, 2048, 0, 1000);
+    } else {
+      joy_steer = map(diff_y, -JOY_DEADBAND, -2048, 0, -1000);
+    }
+  }
+
+  joy_drive = constrain(joy_drive, -1000, 1000);
+  joy_steer = constrain(joy_steer, -1000, 1000);
+
+  // Giới hạn vector hình tròn (Circle clamp) khi gạt chéo góc 45 độ
+  float mag = sqrtf((float)joy_drive * joy_drive + (float)joy_steer * joy_steer);
+  if (mag > 1000.0f) {
+    joy_drive = (int)(joy_drive * 1000.0f / mag);
+    joy_steer = (int)(joy_steer * 1000.0f / mag);
+  }
+
+  // Nếu người dùng đang gạt cần ra khỏi Deadband
+  if (abs(joy_drive) > 0 || abs(joy_steer) > 0) {
+    s_joy_active = true;
+    s_current_drive = joy_drive;
+    s_current_steer = joy_steer;
+    if (s_pending_cmd != CMD_ESTOP) {
+      s_pending_cmd = CMD_DRIVE;
+    }
+  } else if (s_joy_active) {
+    // Vừa nhả cần về vị trí trung tâm (Deadband)
+    s_joy_active = false;
+    s_current_drive = 0;
+    s_current_steer = 0;
+    s_force_tx_immediate = true; // Gửi ngay lệnh dừng 0
   }
 }
 
@@ -246,6 +447,7 @@ void handleSerialInput() {
 
 void loop() {
   handleSerialInput();
+  handleJoystick();
 
   uint32_t now = millis();
 
@@ -253,14 +455,15 @@ void loop() {
     static uint32_t s_last_err_ms = 0;
     if ((now - s_last_err_ms) >= 2000) {
       s_last_err_ms = now;
-      Serial.println("[LỖI PHẦN CỨNG 🔴] ESP32 không nhận diện được module NRF24L01! Kiểm tra dây SPI: 3.3V, GND, CE=4, CSN=5, SCK=18, MISO=19, MOSI=23");
+      Serial.println("[LỖI NRF24 🔴] ESP32 không nhận diện module NRF! Kiểm tra dây 3.3V, GND, CE=4, CSN=5, SCK=18, MISO=19, MOSI=23");
     }
     return;
   }
 
-  // Phát gói tin điều khiển định kỳ sang STM32 (mỗi 40 ms = 25 Hz)
-  if ((now - s_last_tx_ms) >= CONTROL_INTERVAL_MS) {
+  // Gửi định kỳ mỗi 20 ms (50 Hz) HOẶC phát tức thời khi có sự kiện thay đổi lệnh/hướng
+  if ((now - s_last_tx_ms) >= CONTROL_INTERVAL_MS || s_force_tx_immediate) {
     s_last_tx_ms = now;
+    s_force_tx_immediate = false;
 
     txPacket.magic      = PROTOCOL_MAGIC_BYTE; // 0xAA
     txPacket.version    = PROTOCOL_VERSION;    // 0x01
@@ -275,19 +478,18 @@ void loop() {
     // Tính checksum
     txPacket.checksum = protocol_calc_checksum((const uint8_t*)&txPacket, sizeof(RadioPacket_t) - 2);
 
-    // Gửi qua sóng NRF24L01 và kiểm tra tín hiệu phản hồi phần cứng (Hardware Auto-ACK)
+    // Gửi qua sóng NRF24L01 (Hardware Auto-ACK)
     bool tx_ok = radio.write(&txPacket, sizeof(RadioPacket_t));
 
     if (tx_ok) {
       s_consecutive_fails = 0;
-      digitalWrite(PIN_LED, HIGH); // XE ĐANG KẾT NỐI VÀ PHẢN HỒI AUTO-ACK TỐT -> ĐÈN XANH SÁNG LIÊN TỤC!
+      digitalWrite(PIN_LED, HIGH); // Auto-ACK thành công: LED sáng liên tục
     } else {
       if (s_consecutive_fails < 255) s_consecutive_fails++;
       if (s_consecutive_fails >= 4) {
-        // Khi chưa nhận được ACK từ STM32: Nhấp nháy đèn LED đều 0.5s để người dùng biết ESP32 vẫn đang phát sóng tìm xe
         static uint32_t s_last_blink_ms = 0;
         static bool s_blink_state = false;
-        if ((now - s_last_blink_ms) >= 500) {
+        if ((now - s_last_blink_ms) >= 400) {
           s_last_blink_ms = now;
           s_blink_state = !s_blink_state;
           digitalWrite(PIN_LED, s_blink_state ? HIGH : LOW);
@@ -295,20 +497,23 @@ void loop() {
       }
     }
 
-    // In thông báo trạng thái định kỳ mỗi 1 giây cho App Python
+    // In thông báo định kỳ mỗi 1 giây
     static uint32_t s_last_log_ms = 0;
     if ((now - s_last_log_ms) >= 1000) {
       s_last_log_ms = now;
       const char *cmd_str = (s_pending_cmd == CMD_ARM) ? "ARM" : ((s_pending_cmd == CMD_DISARM) ? "DISARM" : ((s_pending_cmd == CMD_ESTOP) ? "ESTOP" : "DRIVE"));
+      const char *dir_str = get_direction_8way(s_current_drive, s_current_steer);
+
       if (s_consecutive_fails < 4) {
-        Serial.printf("[KẾT NỐI TỐT 🟢] Sóng NRF OK | Gói #%u | Lệnh: %s | Tốc độ: %d | Rẽ: %d | ĐÈN XANH SÁNG LIÊN TỤC\n",
-                      s_seq, cmd_str, s_current_drive, s_current_steer);
+        Serial.printf("[SÓNG TỐT 🟢] Gói #%u | %s | Hướng: %s | Tốc độ=%d, Rẽ=%d\n",
+                      s_seq, cmd_str, dir_str, s_current_drive, s_current_steer);
       } else {
-        Serial.printf("[CHỜ TÍN HIỆU XE ⏳] Đang phát sóng tìm xe STM32... (Gói #%u) | ĐÈN XANH NHẤP NHÁY | Hãy bật nguồn xe!\n", s_seq);
+        Serial.printf("[CHỜ TÍN HIỆU XE ⏳] Đang phát sóng tìm xe... (Gói #%u) | Hướng: %s | Hãy bật nguồn xe STM32!\n",
+                      s_seq, dir_str);
       }
     }
 
-    // Nếu vừa gửi lệnh ARM thì chuyển sang duy trì lệnh DRIVE
+    // Nếu vừa gửi lệnh ARM thì tự động duy trì lệnh DRIVE
     if (s_pending_cmd == CMD_ARM) {
       s_pending_cmd = CMD_DRIVE;
     }

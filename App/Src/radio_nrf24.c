@@ -133,6 +133,17 @@ static void nrf_send_cmd(uint8_t cmd)
     csn_high();
 }
 
+static inline uint8_t nrf_get_status(void)
+{
+    uint8_t cmd = NRF_CMD_NOP;
+    uint8_t rx = 0;
+    spi_clear_flags();
+    csn_low();
+    HAL_SPI_TransmitReceive(s_hspi, &cmd, &rx, 1, 2);
+    csn_high();
+    return rx;
+}
+
 static void radio_apply_config(void)
 {
     ce_low();
@@ -243,52 +254,56 @@ void radio_update(uint32_t current_time_ms)
         return;
     }
 
-    /* Kiểm tra tính sẵn sàng của phần cứng qua STATUS */
-    uint8_t status = nrf_read_reg(NRF_REG_STATUS);
+    /* Kiểm tra nhanh trạng thái phần cứng và hàng đợi gói tin qua lệnh NOP (1 byte SPI siêu tốc < 2us) */
+    uint8_t status = nrf_get_status();
     if (status == 0x00 || status == 0xFF) {
         s_initialized = false;
         s_connected = false;
         return;
     }
 
-    /* Kiểm tra và đọc các gói tin có trong RX FIFO (giới hạn tối đa 4 lần để chống lặp vô tận) */
-    uint8_t rx_guard = 0;
-    while (rx_guard++ < 4) {
-        uint8_t fifo_st = nrf_read_reg(NRF_REG_FIFO_STATUS);
-        if (fifo_st == 0x00 || fifo_st == 0xFF || (fifo_st & 0x01)) {
-            /* FIFO rỗng (RX_EMPTY) hoặc lỗi SPI */
-            break;
-        }
+    /* Kiểm tra xem có dữ liệu trong RX FIFO không:
+     * - Bit 6 (RX_DR): Cờ ngắt có dữ liệu mới nhận
+     * - Bits 3:1 (RX_P_NO): 000 = Pipe 0 có payload; 111 = RX FIFO rỗng */
+    if ((status & 0x40) || (((status >> 1) & 0x07) != 0x07)) {
+        uint8_t rx_guard = 0;
+        while (rx_guard++ < 4) {
+            RadioPacket_t packet;
+            nrf_read_buf(NRF_CMD_R_RX_PAYLOAD, (uint8_t*)&packet, sizeof(RadioPacket_t));
 
-        RadioPacket_t packet;
-        nrf_read_buf(NRF_CMD_R_RX_PAYLOAD, (uint8_t*)&packet, sizeof(RadioPacket_t));
+            /* Kiểm tra tính toàn vẹn của gói tin */
+            if (packet.magic == PROTOCOL_MAGIC_BYTE && packet.version == PROTOCOL_VERSION) {
+                uint16_t expected_cs = protocol_calc_checksum((const uint8_t*)&packet, sizeof(RadioPacket_t) - 2);
+                if (expected_cs == packet.checksum) {
+                    s_last_packet_ms = current_time_ms;
+                    s_connected = true;
 
-        /* Kiểm tra tính toàn vẹn của gói tin */
-        if (packet.magic == PROTOCOL_MAGIC_BYTE && packet.version == PROTOCOL_VERSION) {
-            uint16_t expected_cs = protocol_calc_checksum((const uint8_t*)&packet, sizeof(RadioPacket_t) - 2);
-            if (expected_cs == packet.checksum) {
-                s_last_packet_ms = current_time_ms;
-                s_connected = true;
+                    s_cmd_drive = (float)packet.drive_cmd / 1000.0f; /* Normalization -1.0 .. +1.0 */
+                    s_cmd_steer = (float)packet.steer_cmd / 1000.0f;
 
-                s_cmd_drive = (float)packet.drive_cmd / 1000.0f; /* Normalization -1.0 .. +1.0 */
-                s_cmd_steer = (float)packet.steer_cmd / 1000.0f;
-
-                if (packet.cmd == CMD_ARM) {
-                    s_cmd_arm = true;
-                    s_cmd_disarm = false;
-                    s_cmd_estop = false;
-                } else if (packet.cmd == CMD_DISARM) {
-                    s_cmd_disarm = true;
-                    s_cmd_arm = false;
-                } else if (packet.cmd == CMD_ESTOP || (packet.flags & 0x01)) {
-                    s_cmd_estop = true;
+                    if (packet.cmd == CMD_ARM) {
+                        s_cmd_arm = true;
+                        s_cmd_disarm = false;
+                        s_cmd_estop = false;
+                    } else if (packet.cmd == CMD_DISARM) {
+                        s_cmd_disarm = true;
+                        s_cmd_arm = false;
+                    } else if (packet.cmd == CMD_ESTOP || (packet.flags & 0x01)) {
+                        s_cmd_estop = true;
+                    }
                 }
             }
-        }
-    }
 
-    /* Xóa cờ ngắt RX_DR (và cả TX_DS, MAX_RT nếu có) */
-    nrf_write_reg(NRF_REG_STATUS, 0x70);
+            uint8_t fifo_st = nrf_read_reg(NRF_REG_FIFO_STATUS);
+            if (fifo_st == 0x00 || fifo_st == 0xFF || (fifo_st & 0x01)) {
+                /* FIFO rỗng (RX_EMPTY) hoặc lỗi SPI */
+                break;
+            }
+        }
+
+        /* Xóa cờ ngắt RX_DR (và cả TX_DS, MAX_RT nếu có) */
+        nrf_write_reg(NRF_REG_STATUS, 0x70);
+    }
 
     /* Kiểm tra timeout mất sóng */
     if (s_connected && ((current_time_ms - s_last_packet_ms) > RADIO_TIMEOUT_MS)) {

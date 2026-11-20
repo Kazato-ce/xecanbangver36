@@ -19,8 +19,8 @@ static float s_kp_pos   = 0.002f;         /* Hệ số giữ vị trí đứng y
 
 static float s_kp_steer = PID_STEER_KP;   /* Hệ số bẻ lái (Steering) */
 
-static float s_target_offset_deg = 0.45f;  /* Góc trim cân bằng tự nhiên */
-static float s_target_pitch_deg  = 0.45f;  /* Góc nghiêng mục tiêu tức thời */
+static float s_target_offset_deg = 0.1f;  /* Góc trim cân bằng tự nhiên */
+static float s_target_pitch_deg  = 0.1f;  /* Góc nghiêng mục tiêu tức thời */
 
 /* Biến trạng thái nội bộ thuật toán BalancingWii */
 static float s_actual_averaged_speed = 0.0f; /* Tốc độ trung bình qua lọc thông thấp */
@@ -34,6 +34,8 @@ static float s_out_right_steps = 0.0f;
 static float s_out_left_filtered = 0.0f;
 static float s_out_right_filtered = 0.0f;
 static float s_gyro_rate_filtered = 0.0f;
+static float s_cmd_drive_filtered = 0.0f;
+static float s_cmd_steer_filtered = 0.0f;
 
 static inline float clampf(float val, float min_val, float max_val)
 {
@@ -68,6 +70,8 @@ void balance_reset(void)
     s_out_left_filtered = 0.0f;
     s_out_right_filtered = 0.0f;
     s_gyro_rate_filtered = 0.0f;
+    s_cmd_drive_filtered = 0.0f;
+    s_cmd_steer_filtered = 0.0f;
 }
 
 void balance_set_pid(float kp_angle, float kd_angle, float ki_angle, float kp_speed, float ki_speed, float kp_steer)
@@ -115,19 +119,35 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
 {
     if (dt_s <= 0.0f || dt_s > 0.05f) dt_s = CONTROL_DT_S;
 
+    /* 0. Bộ lọc chuyển hướng 8 hướng (8-way motion smoothing & circular clamping):
+     * Khi người dùng gạt joystick chéo hoặc đổi hướng nhanh,
+     * bộ lọc EMA làm mịn tín hiệu trong ~75ms giúp xe lướt mượt, không giật khựng */
+    float norm_drive = clampf(cmd_drive, -1.0f, 1.0f);
+    float norm_steer = clampf(cmd_steer, -1.0f, 1.0f);
+
+    /* Giới hạn vector hình tròn (Circle clamp) khi di chuyển chéo */
+    float mag = sqrtf(norm_drive * norm_drive + norm_steer * norm_steer);
+    if (mag > 1.0f) {
+        norm_drive /= mag;
+        norm_steer /= mag;
+    }
+
+    s_cmd_drive_filtered = s_cmd_drive_filtered * 0.85f + norm_drive * 0.15f;
+    s_cmd_steer_filtered = s_cmd_steer_filtered * 0.85f + norm_steer * 0.15f;
+
     /* 1. Lấy tốc độ bánh xe thực tế hiện tại (steps/sec) */
     float actual_speed = 0.5f * (stepper_get_speed(MOTOR_LEFT) + stepper_get_speed(MOTOR_RIGHT));
 
     /* 2. Bộ lọc thông thấp tốc độ (BalancingWii: 0.92 * avg + 0.08 * cur) */
     s_actual_averaged_speed = s_actual_averaged_speed * 0.92f + actual_speed * 0.08f;
 
-    /* Quy đổi lệnh lái cmd_drive (-1.0 .. +1.0) sang tốc độ mục tiêu */
-    float target_speed = cmd_drive * (float)STEP_CRUISE_MAX_HZ;
+    /* Quy đổi lệnh lái s_cmd_drive_filtered (-1.0 .. +1.0) sang tốc độ mục tiêu */
+    float target_speed = s_cmd_drive_filtered * (float)STEP_CRUISE_MAX_HZ;
 
     /* 3. Chế độ Giữ vị trí (BalancingWii Position Hold Mode):
      * Khi xe đứng yên không có lệnh di chuyển (target_speed = 0, steer = 0),
      * tự động tích lũy quãng đường trôi để tạo góc phản kháng đưa xe về chỗ cũ */
-    if (fabsf(target_speed) < 50.0f && fabsf(cmd_steer) < 0.05f) {
+    if (fabsf(target_speed) < 50.0f && fabsf(s_cmd_steer_filtered) < 0.05f) {
         s_position_error += actual_speed * dt_s;
         s_position_error = clampf(s_position_error, -4000.0f, 4000.0f);
     } else {
@@ -136,8 +156,8 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
 
     /* 4. Vòng ngoài PI Vận Tốc & Tạo Góc Nghiêng Di Chuyển (Drive Pitch Tilt):
      * Xe 2 bánh tự cân bằng muốn tiến/lùi phải nghiêng người theo hướng đó.
-     * cmd_drive (-1.0 .. +1.0) chủ động tạo góc nghiêng drive_tilt để xe lướt đi */
-    float drive_tilt = cmd_drive * 5.5f;
+     * s_cmd_drive_filtered (-1.0 .. +1.0) chủ động tạo góc nghiêng drive_tilt để xe lướt đi */
+    float drive_tilt = s_cmd_drive_filtered * 5.0f;
 
     float speed_err = target_speed - s_actual_averaged_speed - (s_position_error * s_kp_pos);
 
@@ -188,12 +208,15 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
     }
 
     /* Trộn thành phần ga đẩy dứt khoát khi có lệnh tiến/lùi */
-    float drive_throttle = cmd_drive * (float)STEP_CRUISE_MAX_HZ * 0.35f;
+    float drive_throttle = s_cmd_drive_filtered * (float)STEP_CRUISE_MAX_HZ * 0.35f;
     float output_speed = (s_speed * dyn_k) + drive_throttle;
 
-    /* 7. Bộ trộn rẽ (Steering Mixer) & Chống bão hòa (Anti-saturation):
-     * Cắt giảm tốc độ tuyến tính nếu tổng tốc độ và rẽ vượt quá giới hạn xung tối đa */
-    float steering = cmd_steer * s_kp_steer * (float)STEP_CRUISE_MAX_HZ;
+    /* 7. Bộ trộn rẽ thích ứng 8 hướng (Adaptive 8-way Steering Mixer):
+     * - Khi xe đứng yên hoặc tốc độ thấp: lực quay tối đa để quay tại chỗ nhạy bén
+     * - Khi xe đang tiến/lùi với tốc độ cao: giảm bớt độ nhạy rẽ để xe lượn chéo mềm mại,
+     *   tránh lực ly tâm làm lật ngang xe */
+    float steer_adaptive = 1.0f / (1.0f + 0.5f * fabsf(s_cmd_drive_filtered));
+    float steering = s_cmd_steer_filtered * steer_adaptive * s_kp_steer * (float)STEP_CRUISE_MAX_HZ;
     float max_spd = STEP_FREQ_MAX_HZ;
 
     if ((fabsf(output_speed) + fabsf(steering)) > max_spd) {
