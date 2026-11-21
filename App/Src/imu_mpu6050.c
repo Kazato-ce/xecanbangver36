@@ -14,12 +14,16 @@
 #define MPU_REG_WHO_AM_I        0x75
 
 #define MPU_I2C_ADDR            (IMU_I2C_ADDR_7BIT << 1)
+#define IMU_YAW_SIGN            1.0f
 
 static I2C_HandleTypeDef *s_hi2c = NULL;
 static bool s_calibrated = false;
 static float s_gyro_bias = 0.0f;
+static float s_gyro_z_bias = 0.0f;
 static float s_pitch_deg = 0.0f;
 static float s_gyro_rate_dps = 0.0f;
+static float s_gyro_z_dps = 0.0f;
+static float s_yaw_deg = 0.0f;
 static uint32_t s_consecutive_errors = 0;
 static volatile bool s_data_ready_flag = false;
 
@@ -44,6 +48,8 @@ bool imu_init(I2C_HandleTypeDef *hi2c)
     s_consecutive_errors = 0;
     s_pitch_deg = 0.0f;
     s_gyro_rate_dps = 0.0f;
+    s_gyro_z_dps = 0.0f;
+    s_yaw_deg = 0.0f;
 
     /* 1. Kiểm tra WHO_AM_I (0x68 là default AD0=0, 0x69 là AD0=1, 0x70/0x72 là bản clone MPU6500) */
     uint8_t who_am_i = 0;
@@ -105,6 +111,7 @@ bool imu_calibrate(uint16_t sample_count)
     if (!s_hi2c || sample_count == 0) return false;
 
     float sum_gyro = 0.0f;
+    float sum_gyro_z = 0.0f;
     uint16_t valid_samples = 0;
     uint8_t buf[14];
 
@@ -112,19 +119,25 @@ bool imu_calibrate(uint16_t sample_count)
         if (mpu_read_bytes(MPU_REG_ACCEL_XOUT_H, buf, 14)) {
             int16_t raw_gyro_y = (int16_t)((buf[10] << 8) | buf[11]);
             int16_t raw_gyro_x = (int16_t)((buf[8] << 8) | buf[9]);
+            int16_t raw_gyro_z = (int16_t)((buf[12] << 8) | buf[13]);
             int16_t raw_gyro = (IMU_TILT_AXIS == 0) ? raw_gyro_y : raw_gyro_x;
             sum_gyro += (float)raw_gyro / 65.5f;
+            sum_gyro_z += (float)raw_gyro_z / 65.5f;
             valid_samples++;
         }
         HAL_Delay(2);
     }
 
-    if (valid_samples < (sample_count * 3 / 4)) {
+    uint16_t minimum_samples = (uint16_t)(sample_count - (sample_count / 4U));
+    if (valid_samples < minimum_samples) {
         s_calibrated = false;
         return false;
     }
 
     s_gyro_bias = sum_gyro / (float)valid_samples;
+    s_gyro_z_bias = sum_gyro_z / (float)valid_samples;
+    s_yaw_deg = 0.0f;
+    s_gyro_z_dps = 0.0f;
     s_calibrated = true;
     s_consecutive_errors = 0;
     return true;
@@ -148,6 +161,7 @@ bool imu_read(float dt_s)
     int16_t raw_az = (int16_t)((buf[4] << 8) | buf[5]);
     int16_t raw_gx = (int16_t)((buf[8] << 8) | buf[9]);
     int16_t raw_gy = (int16_t)((buf[10] << 8) | buf[11]);
+    int16_t raw_gz = (int16_t)((buf[12] << 8) | buf[13]);
 
     float ax = (float)raw_ax / 8192.0f;
     float ay = (float)raw_ay / 8192.0f;
@@ -171,6 +185,15 @@ bool imu_read(float dt_s)
 
     s_gyro_rate_dps = gyro_raw_dps;
 
+    /* Tích hợp góc quay Yaw Z */
+    float gz_dps = ((float)raw_gz / 65.5f) - s_gyro_z_bias;
+    if (fabsf(gz_dps) <= 0.25f) {
+        gz_dps = 0.0f;
+    }
+    gz_dps *= IMU_YAW_SIGN;
+    s_gyro_z_dps = gz_dps;
+    s_yaw_deg += gz_dps * dt_s;
+
     /* Complementary Filter */
     const float alpha = IMU_FILTER_ALPHA;
     s_pitch_deg = alpha * (s_pitch_deg + s_gyro_rate_dps * dt_s) + (1.0f - alpha) * acc_angle_deg;
@@ -186,6 +209,21 @@ float imu_get_pitch_deg(void)
 float imu_get_gyro_rate_dps(void)
 {
     return s_gyro_rate_dps;
+}
+
+float imu_get_yaw_deg(void)
+{
+    return s_yaw_deg;
+}
+
+float imu_get_gyro_z_dps(void)
+{
+    return s_gyro_z_dps;
+}
+
+void imu_reset_yaw(void)
+{
+    s_yaw_deg = 0.0f;
 }
 
 bool imu_is_calibrated(void)

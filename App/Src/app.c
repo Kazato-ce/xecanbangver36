@@ -12,12 +12,91 @@
 #include "protocol.h"
 #include <math.h>
 
+#define DEG2RAD                    0.01745329252f
+#define NAV_LANE_LAT_KP            0.008f
+#define NAV_LANE_YAW_KP            0.025f
+#define NAV_STEER_LIMIT            0.35f
+#define NAV_AVOID_YAW_LIMIT_DEG    55.0f
+#define NAV_AVOID_DRIVE            0.25f
+
+typedef enum {
+    NAV_LANE_FOLLOW = 0,
+    NAV_AVOID_OBSTACLE,
+    NAV_RETURN_LANE
+} NavigationState_t;
+
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 
 static TIM_HandleTypeDef s_htim6;
 static TIM_HandleTypeDef s_htim7;
 static SPI_HandleTypeDef s_hspi2;
+static float s_lane_ref_yaw_deg = 0.0f;
+static float s_lane_lat_err_mm = 0.0f;
+static NavigationState_t s_navigation_state = NAV_LANE_FOLLOW;
+static float s_avoid_direction = 1.0f;
+
+static float app_clampf(float value, float min_value, float max_value)
+{
+    return (value < min_value) ? min_value : ((value > max_value) ? max_value : value);
+}
+
+static float app_wrap_angle_deg(float angle_deg)
+{
+    return atan2f(sinf(angle_deg * DEG2RAD), cosf(angle_deg * DEG2RAD)) / DEG2RAD;
+}
+
+static float app_lane_steer(float yaw_deg)
+{
+    float yaw_error = app_wrap_angle_deg(s_lane_ref_yaw_deg - yaw_deg);
+    return app_clampf((-s_lane_lat_err_mm * NAV_LANE_LAT_KP)
+                    + (yaw_error * NAV_LANE_YAW_KP),
+                      -NAV_STEER_LIMIT, NAV_STEER_LIMIT);
+}
+
+static void app_update_navigation(float yaw_deg,
+                                  uint16_t dist_front,
+                                  uint16_t dist_left,
+                                  uint16_t dist_right,
+                                  float *cmd_drive,
+                                  float *cmd_steer)
+{
+    if (s_navigation_state == NAV_LANE_FOLLOW) {
+        *cmd_steer = app_lane_steer(yaw_deg);
+        if (dist_front >= 2U && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
+            s_avoid_direction = (dist_left > dist_right) ? 1.0f : -1.0f;
+            s_navigation_state = NAV_AVOID_OBSTACLE;
+        }
+    }
+
+    if (s_navigation_state == NAV_AVOID_OBSTACLE) {
+        uint16_t obstacle_side = (s_avoid_direction > 0.0f) ? dist_right : dist_left;
+        if (dist_front >= OBSTACLE_SLOWDOWN_DIST_CM && obstacle_side >= 35U) {
+            s_navigation_state = NAV_RETURN_LANE;
+        } else if (dist_front >= 2U && dist_front < OBSTACLE_STOP_DIST_CM) {
+            *cmd_drive = 0.0f;
+            *cmd_steer = s_avoid_direction * NAV_STEER_LIMIT;
+        } else {
+            float yaw_limit = s_lane_ref_yaw_deg
+                            + (s_avoid_direction * NAV_AVOID_YAW_LIMIT_DEG);
+            float yaw_error = app_wrap_angle_deg(yaw_limit - yaw_deg);
+            *cmd_drive = fminf(*cmd_drive, NAV_AVOID_DRIVE);
+            *cmd_steer = app_clampf(yaw_error * NAV_LANE_YAW_KP,
+                                    -NAV_STEER_LIMIT, NAV_STEER_LIMIT);
+        }
+    }
+
+    if (s_navigation_state == NAV_RETURN_LANE) {
+        float yaw_error = app_wrap_angle_deg(s_lane_ref_yaw_deg - yaw_deg);
+        if (fabsf(s_lane_lat_err_mm) < 25.0f && fabsf(yaw_error) < 3.0f) {
+            s_navigation_state = NAV_LANE_FOLLOW;
+            *cmd_steer = app_lane_steer(yaw_deg);
+        } else {
+            *cmd_drive *= 0.7f;
+            *cmd_steer = app_lane_steer(yaw_deg);
+        }
+    }
+}
 
 static void app_dwt_init(void)
 {
@@ -107,6 +186,10 @@ void app_init(void)
         /* Lấy 300 mẫu hiệu chuẩn (~600 ms) */
         imu_calibrate(300);
     }
+    s_lane_ref_yaw_deg = imu_get_yaw_deg();
+    s_lane_lat_err_mm = 0.0f;
+    s_navigation_state = NAV_LANE_FOLLOW;
+    s_avoid_direction = 1.0f;
 
     /* 6. Khởi động Timer điều khiển và phát xung */
     app_timers_init();
@@ -130,6 +213,9 @@ void app_timer_control_tick(void)
     imu_read(CONTROL_DT_S);
 
     float pitch = imu_get_pitch_deg();
+    tof_evaluate_cliff(pitch);
+    bool cliff_detected = tof_is_cliff_detected();
+    float yaw = imu_get_yaw_deg();
     float gyro_rate = imu_get_gyro_rate_dps();
     uint32_t imu_err = imu_get_error_count();
 
@@ -176,9 +262,41 @@ void app_timer_control_tick(void)
     /* Cập nhật Máy trạng thái */
     sm_update(pitch, control_link_ok, arm_req, disarm_req, estop_req, imu_err);
 
-    if (sm_get_state() == STATE_ARMED) {
-        /* Giảm tốc độ tiến nếu cảm biến phía trước phát hiện vật cản thực tế (bỏ qua giá trị 0/ngắt kết nối) */
-        if (cmd_drive > 0.0f) {
+    bool is_armed = (sm_get_state() == STATE_ARMED);
+    if (!is_armed || fabsf(cmd_steer) >= 0.05f) {
+        s_lane_ref_yaw_deg = yaw;
+        s_lane_lat_err_mm = 0.0f;
+        s_navigation_state = NAV_LANE_FOLLOW;
+    } else {
+        float left_steps_s = stepper_get_speed(MOTOR_LEFT);
+        float right_steps_s = stepper_get_speed(MOTOR_RIGHT);
+        float linear_speed_mm_s = 0.5f * (left_steps_s + right_steps_s)
+                                * (3.14159265359f * WHEEL_DIAMETER_M * 1000.0f)
+                                / (float)MOTOR_STEPS_PER_REV;
+        float yaw_from_lane_rad = app_wrap_angle_deg(yaw - s_lane_ref_yaw_deg) * DEG2RAD;
+        s_lane_lat_err_mm += linear_speed_mm_s * sinf(yaw_from_lane_rad) * CONTROL_DT_S;
+        s_lane_lat_err_mm = app_clampf(s_lane_lat_err_mm, -2000.0f, 2000.0f);
+    }
+
+    if (is_armed) {
+        /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection) */
+        if (cliff_detected) {
+            s_navigation_state = NAV_LANE_FOLLOW;
+            if (cmd_drive >= 0.0f) {
+                cmd_drive = -0.22f; /* Tự động kích hoạt số lùi khẩn cấp */
+            }
+        }
+
+        /* Tự động né vật cản & bám làn khi đang chạy thẳng không có lệnh bẻ lái thủ công */
+        if (cmd_drive > 0.05f && fabsf(cmd_steer) < 0.05f && !cliff_detected) {
+            uint16_t dist_front = 999U;
+            uint16_t dist_left = 999U;
+            uint16_t dist_right = 999U;
+            ultrasonic_get_all_dist_cm(&dist_front, &dist_left, &dist_right);
+            app_update_navigation(yaw, dist_front, dist_left, dist_right,
+                                  &cmd_drive, &cmd_steer);
+        } else if (cmd_drive > 0.0f) {
+            /* Giảm tốc an toàn thủ công nếu cảm biến phía trước phát hiện vật cản */
             uint16_t dist_front = ultrasonic_get_dist_cm(US_FRONT);
             if (dist_front >= 2 && dist_front < OBSTACLE_STOP_DIST_CM) {
                 cmd_drive = 0.0f;

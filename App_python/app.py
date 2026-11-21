@@ -3,13 +3,16 @@
 """
 ================================================================================
   MÁY TRẠM ĐIỀU KHIỂN & GIÁM SÁT XE CÂN BẰNG 2 BÁNH STM32F405 (GCS)
-  TÍCH HỢP ESP32-CAM VIDEO STREAM & NỀN TẢNG NHẬN DIỆN THỊ GIÁC MÁY TÍNH (AI/CV)
+  TÍCH HỢP ESP32-CAM VIDEO STREAM & ĐIỀU KHIỂN CỬ CHỈ BÀN TAY MEDIAPIPE
 ================================================================================
 Tác vụ chính:
- 1. Video Stream từ ESP32-CAM qua HTTP MJPEG/RTSP (sẵn sàng phát triển AI nhận diện).
- 2. Pipeline xử lý thị giác máy tính OpenCV (Color/Object tracking, Line detection).
+ 1. Video Stream từ ESP32-CAM / ESP32-S3 CAM qua HTTP MJPEG/RTSP (Góc nhìn thứ nhất FPV).
+ 2. Điều khiển xe bằng CỬ CHỈ BÀN TAY (MediaPipe Hands qua Webcam máy tính):
+    - Đưa ngón tay lên/xuống -> Tiến/Lùi.
+    - Nghiêng ngón tay trái/phải -> Bẻ lái Trái/Phải.
+    - Rút tay về hoặc ra ngoài vùng -> Tự động dừng phanh (STOP).
  3. Kết nối Serial COM siêu tốc (115200 baud) qua ESP32 DevKit V1 NRF24 Dongle.
- 4. Điều khiển 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải,
+ 4. Bảng điều khiển 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải,
     Lùi-Trái, Lùi-Phải (Phím tắt: W/A/S/D/Q/E/Z/C/Space/X/V).
  5. Giám sát Telemetry thời gian thực: Góc Pitch, Tốc độ góc Gyro, Pin 4S, Vật cản.
 ================================================================================
@@ -28,17 +31,20 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-# Import driver serial và video worker
+# Import driver serial, video worker và hand gesture controller
 try:
     from serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
     from video_worker import VideoStreamWorker
+    from hand_controller import HandGestureWorker
 except ImportError:
     try:
         from tools.python_ground_station.serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
         from tools.python_ground_station.video_worker import VideoStreamWorker
+        from tools.python_ground_station.hand_controller import HandGestureWorker
     except ImportError:
         SerialClient = None
         VideoStreamWorker = None
+        HandGestureWorker = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BẢNG MÀU GIAO DIỆN HIỆN ĐẠI (DARK THEME)
@@ -63,9 +69,9 @@ THEME = {
 class GroundStationApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Xe Cân Bằng STM32F405 — Ground Control Station & ESP32-CAM Vision")
-        self.root.geometry("1320x840")
-        self.root.minsize(1100, 720)
+        self.root.title("Xe Cân Bằng STM32F405 — Ground Station & MediaPipe Hand Control")
+        self.root.geometry("1340x860")
+        self.root.minsize(1120, 720)
         self.root.configure(bg=THEME["bg"])
 
         # Trạng thái Serial COM
@@ -77,17 +83,23 @@ class GroundStationApp:
         self.auto_reconnecting = False
         self._last_reconnect_attempt_ms = 0
 
-        # Trạng thái Video Stream ESP32-CAM
+        # Trạng thái Video Stream FPV ESP32-CAM
         self.video_worker = None
         self.current_frame = None
         self.photo_img = None
         self.fps_display = 0.0
 
-        # Trạng thái Xử lý Thị giác máy tính (AI / Vision Recognition)
+        # Trạng thái Điều khiển cử chỉ bàn tay (MediaPipe Hand Gesture)
+        self.hand_worker = None
+        self.hand_mode_enabled = False
+        self.hand_frame = None
+        self.hand_photo_img = None
+        self._hand_was_active = False
+
+        # Trạng thái Xử lý Thị giác máy tính (AI Vision Hooks)
         self.ai_vision_enabled = tk.BooleanVar(value=False)
         self.ai_mode = tk.StringVar(value="Color / Object Tracking")
         self.ai_auto_steer_enabled = tk.BooleanVar(value=False)
-        self.detected_target = None  # (cx, cy, radius)
 
         # Biến trạng thái xe
         self.robot_state_str = "DISCONNECTED"
@@ -132,7 +144,7 @@ class GroundStationApp:
 
         title_lbl = tk.Label(
             header,
-            text="⚡ ROBOT TỰ CÂN BẰNG STM32F405 — GROUND STATION & ESP32-CAM AI VISION",
+            text="⚡ ROBOT TỰ CÂN BẰNG STM32F405 — GROUND STATION & MEDIAPIPE GESTURE CONTROL",
             font=("Segoe UI", 11, "bold"),
             fg=THEME["primary"],
             bg=THEME["panel"]
@@ -159,18 +171,18 @@ class GroundStationApp:
         self.lbl_system_clock.pack(side=tk.RIGHT)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # BỐ CỤC CHÍNH (CỘT TRÁI: VIDEO & AI VISION | CỘT PHẢI: TELEMETRY & 8-WAY DRIVE)
+    # BỐ CỤC CHÍNH (CỘT TRÁI: VIDEO FPV & AI VISION | CỘT PHẢI: LÁI TAY & 8 HƯỚNG)
     # ──────────────────────────────────────────────────────────────────────────
     def _build_main_layout(self):
         main_pane = tk.Frame(self.root, bg=THEME["bg"], padx=8, pady=6)
         main_pane.pack(fill=tk.BOTH, expand=True)
 
-        # Cột trái: Khung Video Stream ESP32-CAM + Bộ điều khiển AI Vision (~55% chiều rộng)
+        # Cột trái: Khung Video Stream FPV ESP32-CAM (~54% chiều rộng)
         left_col = tk.Frame(main_pane, bg=THEME["bg"], padx=4, pady=4)
         left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Cột phải: COM Port, Telemetry, Điều khiển 8 hướng, Terminal (~45% chiều rộng)
-        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=540, padx=4, pady=4)
+        # Cột phải: COM Port, Telemetry, Điều khiển 8 hướng & Lái tay MediaPipe (~46% chiều rộng)
+        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=560, padx=4, pady=4)
         right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False)
 
         self._build_video_panel(left_col)
@@ -180,12 +192,12 @@ class GroundStationApp:
         self._build_console_panel(right_col)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 1: KHUNG STREAM VIDEO ESP32-CAM & NHẬN DIỆN THỊ GIÁC AI
+    # PANEL 1: KHUNG STREAM VIDEO FPV ESP32-CAM & THỊ GIÁC MÁY TÍNH
     # ──────────────────────────────────────────────────────────────────────────
     def _build_video_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📹 ESP32-CAM Video Stream & Nền Tảng Thị Giác Máy Tính (AI / Vision) ",
+            text=" 📹 ESP32-S3 CAM Video Stream (FPV Góc Nhìn Thứ Nhất) ",
             font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
@@ -205,9 +217,9 @@ class GroundStationApp:
         self.cb_stream_url = ttk.Combobox(
             url_frame,
             values=[
-                "http://192.168.4.2/stream",           # ESP32-CAM phát WiFi Access Point
+                "http://192.168.4.2/stream",           # ESP32-CAM / ESP32-S3 phát Access Point
                 "http://192.168.4.2:81/stream",
-                "http://192.168.1.100:81/stream",       # ESP32-CAM kết nối WiFi nhà
+                "http://192.168.1.100:81/stream",       # ESP32-CAM nối WiFi nhà
                 "http://192.168.1.50/stream",
                 "http://192.168.4.2/capture",          # Chế độ chụp ảnh snapshot
                 "0"                                    # Webcam laptop/PC (thử nghiệm)
@@ -245,22 +257,22 @@ class GroundStationApp:
         )
         btn_snap.pack(side=tk.LEFT, padx=2)
 
-        # Hàng 2: Thanh công cụ Nhận diện AI / Thị giác máy tính (Computer Vision)
-        ai_frame = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=5, relief=tk.GROOVE, bd=1)
+        # Hàng 2: Thanh công cụ Nhận diện AI / Thị giác máy tính
+        ai_frame = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=4, relief=tk.GROOVE, bd=1)
         ai_frame.pack(fill=tk.X, pady=(0, 6))
 
         chk_ai = tk.Checkbutton(
             ai_frame,
-            text="⚡ BẬT NHẬN DIỆN AI / CV",
+            text="⚡ BẬT NHẬN DIỆN AI",
             variable=self.ai_vision_enabled,
             fg=THEME["success"],
             bg=THEME["card_alt"],
             selectcolor="#11111b",
             activebackground=THEME["card_alt"],
             activeforeground=THEME["success"],
-            font=("Segoe UI", 9, "bold")
+            font=("Segoe UI", 8, "bold")
         )
-        chk_ai.pack(side=tk.LEFT, padx=(0, 8))
+        chk_ai.pack(side=tk.LEFT, padx=(0, 6))
 
         tk.Label(ai_frame, text="Chế độ:", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT, padx=(0, 4))
 
@@ -276,7 +288,7 @@ class GroundStationApp:
             width=22,
             font=("Segoe UI", 8)
         )
-        cb_ai_mode.pack(side=tk.LEFT, padx=(0, 8))
+        cb_ai_mode.pack(side=tk.LEFT, padx=(0, 6))
 
         chk_auto = tk.Checkbutton(
             ai_frame,
@@ -291,7 +303,7 @@ class GroundStationApp:
         )
         chk_auto.pack(side=tk.LEFT)
 
-        # Khung Video Canvas hiển thị khung hình
+        # Khung Video Canvas hiển thị khung hình FPV
         self.video_canvas = tk.Canvas(
             card,
             bg="#0b0b12",
@@ -301,10 +313,8 @@ class GroundStationApp:
         self.video_canvas.pack(fill=tk.BOTH, expand=True)
         self.video_canvas.bind("<Configure>", self._on_canvas_resize)
 
-        # Vẽ hình nền chờ ban đầu
-        self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream (ví dụ http://192.168.4.2/stream) và bấm 'MỞ STREAM'")
+        self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream và bấm 'MỞ STREAM'")
 
-        # Thanh trạng thái video dưới đáy
         info_bar = tk.Frame(card, bg=THEME["card_alt"], height=24, padx=8, pady=2)
         info_bar.pack(fill=tk.X, pady=(4, 0))
 
@@ -405,14 +415,8 @@ class GroundStationApp:
         self._log_console(f"[VISION] Đã lưu ảnh snapshot: {fname}", "info")
         messagebox.showinfo("Thành công", f"Đã lưu ảnh snapshot vào:\n{path}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # PIPELINE XỬ LÝ THỊ GIÁC MÁY TÍNH (COMPUTER VISION / AI HOOK)
-    # ──────────────────────────────────────────────────────────────────────────
     def _process_ai_vision(self, frame):
-        """
-        Hook xử lý hình ảnh thời gian thực từ ESP32-CAM:
-        Người dùng có thể dễ dàng thêm mô hình nhận diện AI, YOLO, Haar Cascade hoặc Color Tracking vào đây.
-        """
+        """Pipeline nhận diện thị giác máy tính"""
         if not self.ai_vision_enabled.get():
             return frame
 
@@ -420,9 +424,7 @@ class GroundStationApp:
         h, w = frame.shape[:2]
 
         if mode == "Color / Object Tracking":
-            # Ví dụ: Nhận diện vật thể màu sắc (Color Blob Tracking trong không gian HSV)
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            # Ngưỡng màu (Ví dụ: Màu đỏ / cam / xanh có thể tùy biến)
             lower_color = np.array([0, 120, 70])
             upper_color = np.array([10, 255, 255])
             mask1 = cv2.inRange(hsv, lower_color, upper_color)
@@ -440,11 +442,9 @@ class GroundStationApp:
                 c = max(contours, key=cv2.contourArea)
                 ((cx, cy), radius) = cv2.minEnclosingCircle(c)
                 if radius > 15:
-                    # Vẽ vòng tròn mục tiêu
                     cv2.circle(frame, (int(cx), int(cy)), int(radius), (0, 255, 0), 2)
                     cv2.circle(frame, (int(cx), int(cy)), 4, (0, 0, 255), -1)
 
-                    # Tính độ lệch so với tâm khung hình
                     center_x = w // 2
                     err_x = cx - center_x
                     cv2.line(frame, (center_x, int(cy)), (int(cx), int(cy)), (255, 255, 0), 1)
@@ -452,19 +452,15 @@ class GroundStationApp:
                     text = f"Target: ({int(cx)}, {int(cy)}) | Err_X: {int(err_x)}"
                     cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                    # Tự động lái xe bám theo mục tiêu nếu bật tính năng Auto Steer
-                    if self.ai_auto_steer_enabled.get() and self.serial_running:
+                    if self.ai_auto_steer_enabled.get() and self.serial_running and not self.hand_mode_enabled:
                         steer_val = int(np.clip(err_x * 1.5, -400, 400))
                         drive_val = 150 if abs(err_x) < 80 else 0
                         self.send_serial_command(f"DRIVE {drive_val} {steer_val}")
 
         elif mode == "Line Following (Bám đường)":
-            # Chuyển sang ảnh xám và ngưỡng nhị phân
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             blur = cv2.GaussianBlur(gray, (5, 5), 0)
             _, thresh = cv2.threshold(blur, 60, 255, cv2.THRESH_BINARY_INV)
-
-            # Vùng quan tâm (ROI) ở nửa dưới khung hình
             roi = thresh[int(h * 0.6):, :]
             M = cv2.moments(roi)
             if M["m00"] > 0:
@@ -527,7 +523,6 @@ class GroundStationApp:
         )
         btn_ping.pack(side=tk.LEFT)
 
-        # Hàng 2: Tự động kết nối lại
         row2 = tk.Frame(card, bg=THEME["card"])
         row2.pack(fill=tk.X, pady=(4, 0))
 
@@ -561,7 +556,6 @@ class GroundStationApp:
         )
         card.pack(fill=tk.X, pady=(0, 6))
 
-        # Hàng 1: Trạng thái xe lớn
         row_state = tk.Frame(card, bg=THEME["card"])
         row_state.pack(fill=tk.X, pady=(0, 6))
 
@@ -588,7 +582,6 @@ class GroundStationApp:
         )
         self.lbl_nrf_link.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-        # Hàng 2: Đo góc nghiêng Pitch & Thanh thủy chuẩn
         tilt_card = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=6, relief=tk.GROOVE, bd=1)
         tilt_card.pack(fill=tk.X, pady=(0, 6))
 
@@ -603,7 +596,6 @@ class GroundStationApp:
         self.canvas_tilt.pack(fill=tk.X, pady=(4, 0))
         self.canvas_tilt.bind("<Configure>", lambda e: self._draw_tilt_gauge())
 
-        # Hàng 3: Grid 4 ô chỉ số chi tiết
         grid_frame = tk.Frame(card, bg=THEME["card"])
         grid_frame.pack(fill=tk.X, pady=(0, 4))
 
@@ -635,12 +627,12 @@ class GroundStationApp:
         grid_frame.columnconfigure(1, weight=1)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 4: BẢNG ĐIỀU KHIỂN 8 HƯỚNG DI CHUYỂN
+    # PANEL 4: BẢNG ĐIỀU KHIỂN 8 HƯỚNG & LÁI BẰNG CỬ CHỈ TAY MEDIAPIPE
     # ──────────────────────────────────────────────────────────────────────────
     def _build_controls_8way_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 🎮 Bảng Lệnh Điều Khiển 8 Hướng (Joystick / D-Pad) ",
+            text=" 🎮 Điều Khiển 8 Hướng & Cử Chỉ Bàn Tay (MediaPipe Hands) ",
             font=("Segoe UI", 9, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
@@ -651,7 +643,7 @@ class GroundStationApp:
         )
         card.pack(fill=tk.X, pady=(0, 6))
 
-        # Nút trạng thái chính
+        # Hàng 1: Nút trạng thái chính + Nút bật Lái Cử Chỉ Tay MediaPipe
         act_row = tk.Frame(card, bg=THEME["card"])
         act_row.pack(fill=tk.X, pady=(0, 6))
 
@@ -676,12 +668,20 @@ class GroundStationApp:
         )
         btn_estop.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        # Cụm 8 hướng di chuyển + Thanh trượt
+        self.btn_hand_mode = tk.Button(
+            act_row, text="✋ LÁI TAY: TẮT", font=("Segoe UI", 8, "bold"),
+            bg=THEME["card_alt"], fg=THEME["text"], activebackground=THEME["accent"],
+            relief=tk.FLAT, padx=6, pady=4, command=self.toggle_hand_mode
+        )
+        self.btn_hand_mode.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        # Hàng 2: D-Pad 8 hướng + Thanh trượt + Khung Mini Preview Cử Chỉ Tay
         ctrl_split = tk.Frame(card, bg=THEME["card"])
         ctrl_split.pack(fill=tk.X, pady=2)
 
+        # 3x3 D-Pad
         dpad = tk.Frame(ctrl_split, bg=THEME["card_alt"], padx=6, pady=6, relief=tk.GROOVE, bd=1)
-        dpad.pack(side=tk.LEFT, padx=(0, 8))
+        dpad.pack(side=tk.LEFT, padx=(0, 6))
 
         btn_nw = tk.Button(dpad, text="↖ Q", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_left)
         btn_nw.grid(row=0, column=0, padx=2, pady=2)
@@ -710,9 +710,9 @@ class GroundStationApp:
         btn_se = tk.Button(dpad, text="↘ C", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_right)
         btn_se.grid(row=2, column=2, padx=2, pady=2)
 
-        # Cột thanh trượt
+        # Thanh trượt
         sliders = tk.Frame(ctrl_split, bg=THEME["card"])
-        sliders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sliders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
 
         tk.Label(sliders, text="Tốc độ Tiến/Lùi:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
         self.slider_speed_step = tk.Scale(
@@ -720,7 +720,7 @@ class GroundStationApp:
             bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
         )
         self.slider_speed_step.set(200)
-        self.slider_speed_step.pack(fill=tk.X, pady=(0, 4))
+        self.slider_speed_step.pack(fill=tk.X, pady=(0, 2))
 
         tk.Label(sliders, text="Độ nhạy Rẽ/Quay:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
         self.slider_steer_step = tk.Scale(
@@ -728,13 +728,95 @@ class GroundStationApp:
             bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
         )
         self.slider_steer_step.set(250)
-        self.slider_steer_step.pack(fill=tk.X, pady=(0, 4))
+        self.slider_steer_step.pack(fill=tk.X, pady=(0, 2))
 
         self.lbl_active_direction = tk.Label(
             sliders, text="HƯỚNG: TĨNH (STOP)", font=("Segoe UI", 8, "bold"),
             fg=THEME["primary"], bg=THEME["card_alt"], pady=2
         )
         self.lbl_active_direction.pack(fill=tk.X)
+
+        # Khung Mini Preview Cử Chỉ Tay (MediaPipe Webcam)
+        hand_box = tk.Frame(ctrl_split, bg=THEME["card_alt"], bd=1, relief=tk.SOLID)
+        hand_box.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.hand_canvas = tk.Canvas(hand_box, width=148, height=110, bg="#0b0b12", highlightthickness=0)
+        self.hand_canvas.pack()
+        self._draw_hand_placeholder("Webcam Lái Tay\n(Đang tắt)")
+
+    def _draw_hand_placeholder(self, text):
+        self.hand_canvas.delete("all")
+        self.hand_canvas.create_text(
+            74, 55, text=text, fill=THEME["subtext"], font=("Segoe UI", 8), justify=tk.CENTER
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # QUẢN LÝ CHẾ ĐỘ ĐIỀU KHIỂN CỬ CHỈ BÀN TAY (MEDIAPIPE HANDS)
+    # ──────────────────────────────────────────────────────────────────────────
+    def toggle_hand_mode(self):
+        if self.hand_mode_enabled:
+            self.stop_hand_mode()
+        else:
+            self.start_hand_mode()
+
+    def start_hand_mode(self):
+        if HandGestureWorker is None:
+            messagebox.showerror("Lỗi", "Không tìm thấy module hand_controller.py hoặc mediapipe!")
+            return
+
+        self.hand_mode_enabled = True
+        self._hand_was_active = False
+        self.btn_hand_mode.config(text="✋ LÁI TAY: BẬT", bg=THEME["accent"], fg="#11111b")
+        self._draw_hand_placeholder("Đang mở Webcam...")
+
+        self.hand_worker = HandGestureWorker(
+            cam_index=0,
+            get_limits_fn=lambda: (int(self.slider_speed_step.get()), int(self.slider_steer_step.get())),
+            on_control=self._on_hand_control,
+            on_frame=self._on_hand_frame,
+            on_status=self._on_hand_status
+        )
+        self.hand_worker.start()
+        self._log_console("[GESTURE] Bắt đầu chế độ lái bằng cử chỉ tay MediaPipe.", "info")
+
+    def stop_hand_mode(self):
+        self.hand_mode_enabled = False
+        if self.hand_worker:
+            self.hand_worker.stop()
+            self.hand_worker = None
+        self.hand_frame = None
+        self.btn_hand_mode.config(text="✋ LÁI TAY: TẮT", bg=THEME["card_alt"], fg=THEME["text"])
+        self._draw_hand_placeholder("Webcam Lái Tay\n(Đang tắt)")
+
+        if self._hand_was_active or self.drive_cmd != 0 or self.steer_cmd != 0:
+            self._hand_was_active = False
+            self.cmd_stop()
+        self._log_console("[GESTURE] Đã tắt chế độ lái bằng cử chỉ tay.", "warn")
+
+    def _on_hand_frame(self, frame_bgr):
+        self.hand_frame = frame_bgr
+
+    def _on_hand_status(self, msg, is_ok):
+        def _update():
+            if is_ok:
+                self._log_console(f"[GESTURE] {msg}", "info")
+            else:
+                self._log_console(f"[GESTURE LỖI] {msg}", "err")
+                self.stop_hand_mode()
+        self.root.after(0, _update)
+
+    def _on_hand_control(self, drive_val, steer_val, hand_found):
+        if not self.hand_mode_enabled:
+            return
+        if hand_found:
+            self._hand_was_active = True
+            self.drive_cmd = drive_val
+            self.steer_cmd = steer_val
+            self.send_serial_command(f"DRIVE {drive_val} {steer_val}")
+            self.lbl_active_direction.config(text=f"✋ LÁI: D={drive_val} S={steer_val}")
+        elif self._hand_was_active:
+            self._hand_was_active = False
+            self.cmd_stop()
 
     # ──────────────────────────────────────────────────────────────────────────
     # PANEL 5: TERMINAL CONSOLE & GỬI LỆNH TRỰC TIẾP
@@ -813,7 +895,7 @@ class GroundStationApp:
         self.lbl_sb_txrx = tk.Label(sb, text="TX: 0 | RX: 0", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["panel"])
         self.lbl_sb_txrx.pack(side=tk.LEFT, padx=(0, 15))
 
-        self.lbl_sb_mode = tk.Label(sb, text="8-Way NRF Wireless Bridge & Vision AI Active", font=("Segoe UI", 8), fg=THEME["accent"], bg=THEME["panel"])
+        self.lbl_sb_mode = tk.Label(sb, text="MediaPipe Gesture & ESP32-S3 FPV Stream Ready", font=("Segoe UI", 8), fg=THEME["accent"], bg=THEME["panel"])
         self.lbl_sb_mode.pack(side=tk.RIGHT)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1112,12 +1194,10 @@ class GroundStationApp:
         self._draw_tilt_gauge()
         self.lbl_sb_txrx.config(text=f"TX: {self.tx_count} | RX: {self.rx_count}")
 
-        # 3. Render khung hình Video ESP32-CAM và Xử lý AI Vision
+        # 3. Render khung hình Video FPV ESP32-CAM và Xử lý AI Vision
         if self.current_frame is not None:
             try:
                 frame_to_show = self.current_frame.copy()
-
-                # Đưa qua Pipeline AI Thị Giác Máy Tính
                 frame_to_show = self._process_ai_vision(frame_to_show)
 
                 h_can = self.video_canvas.winfo_height()
@@ -1140,6 +1220,19 @@ class GroundStationApp:
                     self.video_canvas.create_image(pos_x, pos_y, anchor=tk.NW, image=self.photo_img)
 
                     self.lbl_fps.config(text=f"FPS: {self.fps_display:.1f} | Phân giải: {orig_w}x{orig_h}")
+            except Exception:
+                pass
+
+        # 4. Render khung hình Mini Preview Nhận diện Cử Chỉ Bàn Tay (MediaPipe)
+        if self.hand_mode_enabled and self.hand_frame is not None:
+            try:
+                resized_hand = cv2.resize(self.hand_frame, (148, 110), interpolation=cv2.INTER_LINEAR)
+                rgb_hand = cv2.cvtColor(resized_hand, cv2.COLOR_BGR2RGB)
+                pil_hand = Image.fromarray(rgb_hand)
+                self.hand_photo_img = ImageTk.PhotoImage(image=pil_hand)
+
+                self.hand_canvas.delete("all")
+                self.hand_canvas.create_image(0, 0, anchor=tk.NW, image=self.hand_photo_img)
             except Exception:
                 pass
 
@@ -1171,6 +1264,7 @@ class GroundStationApp:
 
     def on_closing(self):
         if messagebox.askokcancel("Thoát", "Bạn có chắc muốn đóng Ground Control Station?"):
+            self.stop_hand_mode()
             self.stop_video_stream()
             self._disconnect_serial()
             self.root.destroy()

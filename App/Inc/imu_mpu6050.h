@@ -11,9 +11,11 @@ bool imu_read(float dt_s);
 
 float imu_get_pitch_deg(void);
 float imu_get_gyro_rate_dps(void);
+float imu_get_yaw_deg(void);
+float imu_get_gyro_z_dps(void);
+void  imu_reset_yaw(void);
 bool  imu_is_calibrated(void);
 uint32_t imu_get_error_count(void);
 void imu_notify_data_ready(void);
-bool imu_diagnostics(uint8_t *out_who_am_i, float *out_bias, float *out_ax, float *out_ay, float *out_az, float *out_gx, float *out_gy, float *out_gz);
 
 #endif /* IMU_MPU6050_H */

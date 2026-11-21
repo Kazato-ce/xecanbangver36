@@ -16,6 +16,8 @@ typedef struct {
     GPIO_TypeDef *echo_port;
     uint16_t      echo_pin;
     uint16_t      dist_cm;
+    uint16_t      hist[3];
+    uint8_t       hist_idx;
 } UltrasonicSensor_t;
 
 static UltrasonicSensor_t s_sensors[US_SENSOR_COUNT];
@@ -38,6 +40,30 @@ static inline uint32_t dwt_cycles_to_us(uint32_t cycles)
 static inline uint32_t us_to_dwt_cycles(uint32_t us)
 {
     return us * (SystemCoreClock / 1000000U);
+}
+
+static uint16_t median3_u16(uint16_t a, uint16_t b, uint16_t c)
+{
+    uint16_t min = a;
+    uint16_t max = a;
+
+    if (b < min) min = b;
+    if (c < min) min = c;
+    if (b > max) max = b;
+    if (c > max) max = c;
+
+    return (uint16_t)((uint32_t)a + b + c - min - max);
+}
+
+static void ultrasonic_push_sample(UltrasonicSensor_t *s, uint16_t raw_cm)
+{
+    if ((raw_cm < 2U) || (raw_cm > 400U)) {
+        raw_cm = 999U;
+    }
+
+    s->hist[s->hist_idx] = raw_cm;
+    s->hist_idx = (uint8_t)((s->hist_idx + 1U) % 3U);
+    s->dist_cm = median3_u16(s->hist[0], s->hist[1], s->hist[2]);
 }
 
 void ultrasonic_init(void)
@@ -64,6 +90,10 @@ void ultrasonic_init(void)
     s_sensors[US_RIGHT].dist_cm   = 999;
 
     for (int i = 0; i < US_SENSOR_COUNT; i++) {
+        s_sensors[i].hist[0] = 999U;
+        s_sensors[i].hist[1] = 999U;
+        s_sensors[i].hist[2] = 999U;
+        s_sensors[i].hist_idx = 0;
         HAL_GPIO_WritePin(s_sensors[i].trig_port, s_sensors[i].trig_pin, GPIO_PIN_RESET);
     }
 
@@ -104,7 +134,7 @@ void ultrasonic_update(uint32_t current_time_ms)
                 s_state = US_STATE_WAIT_ECHO_FALL;
             } else if ((now_cyc - s_state_start_cyc) >= us_to_dwt_cycles(3000)) {
                 /* Timeout 3ms không thấy cạnh lên */
-                s->dist_cm = 999;
+                ultrasonic_push_sample(s, 999U);
                 s_state = US_STATE_COOLDOWN;
                 s_state_start_cyc = now_cyc;
             }
@@ -116,13 +146,12 @@ void ultrasonic_update(uint32_t current_time_ms)
                 uint32_t echo_us = dwt_cycles_to_us(now_cyc - s_echo_rise_cyc);
                 /* Khoảng cách (cm) = thời gian xung (us) / 58 */
                 uint16_t dist = (uint16_t)(echo_us / 58);
-                if (dist > 400) dist = 999;
-                s->dist_cm = dist;
+                ultrasonic_push_sample(s, dist);
                 s_state = US_STATE_COOLDOWN;
                 s_state_start_cyc = now_cyc;
             } else if ((now_cyc - s_state_start_cyc) >= us_to_dwt_cycles(25000)) {
                 /* Timeout ~25ms tương đương ~4m */
-                s->dist_cm = 999;
+                ultrasonic_push_sample(s, 999U);
                 s_state = US_STATE_COOLDOWN;
                 s_state_start_cyc = now_cyc;
             }
@@ -142,6 +171,13 @@ void ultrasonic_update(uint32_t current_time_ms)
 uint16_t ultrasonic_get_dist_cm(UltrasonicId_t id)
 {
     return (id < US_SENSOR_COUNT) ? s_sensors[id].dist_cm : 999;
+}
+
+void ultrasonic_get_all_dist_cm(uint16_t *front, uint16_t *left, uint16_t *right)
+{
+    if (front != NULL) *front = s_sensors[US_FRONT].dist_cm;
+    if (left != NULL) *left = s_sensors[US_LEFT].dist_cm;
+    if (right != NULL) *right = s_sensors[US_RIGHT].dist_cm;
 }
 
 bool ultrasonic_is_obstacle_detected(void)
