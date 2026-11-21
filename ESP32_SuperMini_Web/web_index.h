@@ -222,28 +222,28 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       <div class="form-grid">
         <!-- Kp Góc -->
         <div class="field">
-          <label>Kp Góc (Độ cứng vững thân xe) <span id="lblKp" style="color:var(--accent);">18.0</span></label>
+          <label>Kp Góc (Độ cứng vững thân xe) <span id="lblKp" style="color:var(--accent);">30</span></label>
           <div class="field-row">
-            <input type="range" id="rngKp" min="0" max="60" step="0.5" value="18.0" oninput="syncVal('Kp', this.value)">
-            <input type="number" id="inpKp" step="0.5" min="0" max="100" value="18.0">
+            <input type="range" id="rngKp" min="0" max="60" step="0.5" value="30" oninput="syncVal('Kp', this.value)">
+            <input type="number" id="inpKp" step="0.5" min="0" max="100" value="30">
           </div>
         </div>
 
         <!-- Kd Góc -->
         <div class="field">
-          <label>Kd Góc (Giảm chấn góc - Triệt tiêu rung) <span id="lblKd" style="color:var(--accent);">1.36</span></label>
+          <label>Kd Góc (Giảm chấn góc - Triệt tiêu rung) <span id="lblKd" style="color:var(--accent);">1.9</span></label>
           <div class="field-row">
-            <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.36" oninput="syncVal('Kd', this.value)">
-            <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.36">
+            <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.9" oninput="syncVal('Kd', this.value)">
+            <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.9">
           </div>
         </div>
 
         <!-- Ki Góc -->
         <div class="field">
-          <label>Ki Góc (Tích phân góc) <span id="lblKi" style="color:var(--accent);">0.00</span></label>
+          <label>Ki Góc (Tích phân góc) <span id="lblKi" style="color:var(--accent);">0.000001</span></label>
           <div class="field-row">
-            <input type="range" id="rngKi" min="0" max="3.0" step="0.05" value="0.0" oninput="syncVal('Ki', this.value)">
-            <input type="number" id="inpKi" step="0.05" min="0" max="10" value="0.0">
+            <input type="range" id="rngKi" min="0" max="1.0" step="0.000001" value="0.000001" oninput="syncVal('Ki', this.value)">
+            <input type="number" id="inpKi" step="0.000001" min="0" max="10" value="0.000001">
           </div>
         </div>
 
@@ -258,28 +258,28 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
         <!-- Ki Vận Tốc -->
         <div class="field">
-          <label>Ki Vận Tốc (Khử trôi vị trí) <span id="lblKiS" style="color:var(--green);">0.02</span></label>
+          <label>Ki Vận Tốc (Khử trôi vị trí) <span id="lblKiS" style="color:var(--green);">0.55</span></label>
           <div class="field-row">
-            <input type="range" id="rngKiS" min="0" max="0.5" step="0.01" value="0.02" oninput="syncVal('KiS', this.value)">
-            <input type="number" id="inpKiS" step="0.01" min="0" max="2.0" value="0.02">
+            <input type="range" id="rngKiS" min="0" max="2.0" step="0.01" value="0.55" oninput="syncVal('KiS', this.value)">
+            <input type="number" id="inpKiS" step="0.01" min="0" max="5.0" value="0.55">
           </div>
         </div>
 
         <!-- Kp Lái (Steer) -->
         <div class="field">
-          <label>Kp Lái (Độ nhạy rẽ khi bẻ lái) <span id="lblSteer" style="color:var(--yellow);">1.20</span></label>
+          <label>Kp Lái (Độ nhạy rẽ khi bẻ lái) <span id="lblSteer" style="color:var(--yellow);">1.2</span></label>
           <div class="field-row">
-            <input type="range" id="rngSteer" min="0" max="3.0" step="0.1" value="1.20" oninput="syncVal('Steer', this.value)">
-            <input type="number" id="inpSteer" step="0.1" min="0" max="5.0" value="1.20">
+            <input type="range" id="rngSteer" min="0" max="3.0" step="0.1" value="1.2" oninput="syncVal('Steer', this.value)">
+            <input type="number" id="inpSteer" step="0.1" min="0" max="5.0" value="1.2">
           </div>
         </div>
 
         <!-- Trim Điểm Cân Bằng Cơ Học -->
         <div class="field" style="grid-column: 1 / -1;">
-          <label>Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên) <span id="lblTrim" style="color:#f97316;">0.45°</span></label>
+          <label>Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên) <span id="lblTrim" style="color:#f97316;">-0.45</span></label>
           <div class="field-row">
-            <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="0.45" oninput="syncVal('Trim', this.value)">
-            <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="0.45">
+            <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="-0.45" oninput="syncVal('Trim', this.value)">
+            <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="-0.45">
           </div>
         </div>
       </div>
@@ -302,6 +302,8 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     }
 
     function syncVal(name, val) {
+      const r = document.getElementById('rng' + name);
+      if (r) r.value = val;
       document.getElementById('inp' + name).value = val;
       document.getElementById('lbl' + name).innerText = val;
     }
@@ -327,14 +329,14 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         syncVal('Trim', 0.45);
         showToast("Đã chọn preset: ÊM ÁI (Khuyên dùng)");
       } else if (type === 'stiff') {
-        syncVal('Kp', 24.0);
-        syncVal('Kd', 1.80);
-        syncVal('Ki', 0.05);
-        syncVal('KpS', 0.45);
-        syncVal('KiS', 0.03);
-        syncVal('Steer', 1.40);
-        syncVal('Trim', 0.45);
-        showToast("Đã chọn preset: CỨNG CÁP");
+        syncVal('Kp', 30.0);
+        syncVal('Kd', 1.90);
+        syncVal('Ki', 0.000001);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.55);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', -0.45);
+        showToast("Đã chọn preset: CỨNG CÁP (Mặc định chuẩn)");
       }
     }
 
@@ -479,7 +481,9 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           // Cập nhật thông số PID hiện tại từ STM32
           if (typeof d.kp === 'number') document.getElementById('liveKp').innerText = d.kp.toFixed(2);
           if (typeof d.kd === 'number') document.getElementById('liveKd').innerText = d.kd.toFixed(2);
-          if (typeof d.ki === 'number') document.getElementById('liveKi').innerText = d.ki.toFixed(2);
+          if (typeof d.ki === 'number') {
+            document.getElementById('liveKi').innerText = (d.ki > 0 && d.ki < 0.001) ? d.ki.toFixed(6) : d.ki.toFixed(2);
+          }
           if (typeof d.kp_s === 'number') document.getElementById('liveKpS').innerText = d.kp_s.toFixed(2);
           if (typeof d.ki_s === 'number') document.getElementById('liveKiS').innerText = d.ki_s.toFixed(2);
           if (typeof d.steer === 'number') document.getElementById('liveSteer').innerText = d.steer.toFixed(2);

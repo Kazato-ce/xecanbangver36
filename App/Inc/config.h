@@ -55,14 +55,16 @@
  * Control System / Balance PID Gains (Placeholder - TODO Tune)
  * ==================================================================== */
 /* TODO tune: Người dùng thay thế hệ số từ mô phỏng */
-#define PID_ANGLE_KP                25.0f          /* Độ nhạy góc nghiêng (giảm nhẹ để triệt tiêu tiếng rít) */
-#define PID_ANGLE_KD                1.36f         /* Giảm chấn theo tốc độ góc (giảm từ 0.85 để hết tiếng ré cao tần) */
-#define PID_ANGLE_KI                0.0f          /* Tích phân góc nghiêng */
+#define PID_ANGLE_KP                30.0f         /* Độ nhạy góc nghiêng (Kp Góc = 30) */
+#define PID_ANGLE_KD                1.90f         /* Giảm chấn theo tốc độ góc (Kd Góc = 1.9) */
+#define PID_ANGLE_KI                0.000001f     /* Tích phân góc nghiêng (Ki Góc = 0.000001) */
 
-#define PID_SPEED_KP                0.35f         /* Vòng ngoài điều khiển vận tốc xe */
-#define PID_SPEED_KI                0.55f         /* Tích phân vận tốc */
+#define PID_SPEED_KP                0.35f         /* Vòng ngoài điều khiển vận tốc xe (Kp Vận Tốc = 0.35) */
+#define PID_SPEED_KI                0.55f         /* Tích phân vận tốc (Ki Vận Tốc = 0.55) */
 
-#define PID_STEER_KP                1.2f          /* Hệ số quay xe */
+#define PID_STEER_KP                1.2f          /* Hệ số quay xe (Kp Lái = 1.2) */
+
+#define PID_DEFAULT_TRIM_DEG        (-0.45f)      /* Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên = -0.45°) */
 
 /* ====================================================================
  * NRF24L01 Radio Configuration

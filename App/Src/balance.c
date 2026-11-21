@@ -19,8 +19,8 @@ static float s_kp_pos   = 0.002f;         /* Hệ số giữ vị trí đứng y
 
 static float s_kp_steer = PID_STEER_KP;   /* Hệ số bẻ lái (Steering) */
 
-static float s_target_offset_deg = 0.1f;  /* Góc trim cân bằng tự nhiên */
-static float s_target_pitch_deg  = 0.1f;  /* Góc nghiêng mục tiêu tức thời */
+static float s_target_offset_deg = PID_DEFAULT_TRIM_DEG;  /* Góc trim cân bằng tự nhiên */
+static float s_target_pitch_deg  = PID_DEFAULT_TRIM_DEG;  /* Góc nghiêng mục tiêu tức thời */
 
 /* Biến trạng thái nội bộ thuật toán BalancingWii */
 static float s_actual_averaged_speed = 0.0f; /* Tốc độ trung bình qua lọc thông thấp */
@@ -53,7 +53,7 @@ void balance_init(void)
     s_kp_pos   = 0.002f;
     s_kp_steer = PID_STEER_KP;
 
-    s_target_offset_deg = 0.0f;
+    s_target_offset_deg = PID_DEFAULT_TRIM_DEG;
     balance_reset();
 }
 

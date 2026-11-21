@@ -47,13 +47,13 @@ struct TelemetryData {
   float    rpm_r = 0.0f;
   int      state = 0;       // 0:BOOT, 1:CALIB, 2:DISARMED, 3:ARMED, 4:FAULT
   int      fault = 0;
-  float    kp = 18.0f;
-  float    kd = 1.36f;
-  float    ki = 0.0f;
+  float    kp = 30.0f;
+  float    kd = 1.90f;
+  float    ki = 0.000001f;
   float    kp_s = 0.35f;
-  float    ki_s = 0.02f;
+  float    ki_s = 0.55f;
   float    steer = 1.20f;
-  float    trim = 0.45f;
+  float    trim = -0.45f;
   uint16_t dist_f = 999;
   uint16_t dist_l = 999;
   uint16_t dist_r = 999;
@@ -134,15 +134,15 @@ void parseTelemetryFrame(const String& line) {
 // ──────────────────────────────────────────────
 void sendPidToStm32(float kp, float kd, float ki, float kp_s, float ki_s, float steer, float trim) {
   char cmd[160];
-  snprintf(cmd, sizeof(cmd), "SET_PID %.2f %.2f %.2f %.2f %.2f %.2f\r\n", kp, kd, ki, kp_s, ki_s, steer);
+  snprintf(cmd, sizeof(cmd), "SET_PID %.2f %.2f %.6f %.2f %.2f %.2f %.2f\r\n", kp, kd, ki, kp_s, ki_s, steer, trim);
   StmSerial.print(cmd);
 
   snprintf(cmd, sizeof(cmd),
-    "{\"type\":\"set_pid\",\"seq\":1,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f}\r\n",
+    "{\"type\":\"set_pid\",\"seq\":1,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f}\r\n",
     kp, kd, ki, kp_s, ki_s, steer, trim);
   StmSerial.print(cmd);
 
-  DBG_PRINTF("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.2f, kp_s=%.2f, ki_s=%.2f, steer=%.2f, trim=%.2f\n",
+  DBG_PRINTF("[TX to STM32]: SET_PID kp=%.2f, kd=%.2f, ki=%.6f, kp_s=%.2f, ki_s=%.2f, steer=%.2f, trim=%.2f\n",
              kp, kd, ki, kp_s, ki_s, steer, trim);
 }
 
@@ -171,7 +171,7 @@ void handleGetData() {
   snprintf(json, sizeof(json),
     "{\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
     "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"state\":%d,\"fault\":%d,"
-    "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
+    "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
     "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":%.1f,"
     "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_hw\":%s,\"nrf_link\":%s,\"upright\":%s}",
     telem.pitch, telem.target, telem.rate,

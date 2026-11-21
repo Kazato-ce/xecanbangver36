@@ -209,27 +209,31 @@ static void process_json_command(const char *line)
 
 static void process_text_command(char *line)
 {
-    /* Format: SET_PID <kp> <kd> <ki> [kp_s] [ki_s] [steer] */
+    /* Format: SET_PID <kp> <kd> <ki> [kp_s] [ki_s] [steer] [trim] */
     if (strncmp(line, "SET_PID", 7) == 0) {
         float kp, kd, ki;
-        float kp_s = PID_SPEED_KP, ki_s = PID_SPEED_KI, steer = PID_STEER_KP;
-        int n = sscanf(line + 7, "%f %f %f %f %f %f", &kp, &kd, &ki, &kp_s, &ki_s, &steer);
+        float kp_s = PID_SPEED_KP, ki_s = PID_SPEED_KI, steer = PID_STEER_KP, trim = PID_DEFAULT_TRIM_DEG;
+        int n = sscanf(line + 7, "%f %f %f %f %f %f %f", &kp, &kd, &ki, &kp_s, &ki_s, &steer, &trim);
         if (n >= 3) {
             balance_set_pid(kp, kd, ki, kp_s, ki_s, steer);
-            char resp[96];
-            snprintf(resp, sizeof(resp), "OK PID kp=%.2f kd=%.2f ki=%.2f kp_s=%.2f ki_s=%.2f steer=%.2f\r\n",
-                     kp, kd, ki, kp_s, ki_s, steer);
+            if (n >= 7) {
+                balance_set_target_offset(trim);
+            }
+            char resp[120];
+            snprintf(resp, sizeof(resp), "OK PID kp=%.2f kd=%.2f ki=%.6f kp_s=%.2f ki_s=%.2f steer=%.2f trim=%.2f\r\n",
+                     kp, kd, ki, kp_s, ki_s, steer, (n >= 7) ? trim : balance_get_target_offset());
             uart_send_string(resp);
         } else {
-            uart_send_string("ERR Syntax: SET_PID <kp> <kd> <ki> [kp_s] [ki_s] [steer]\r\n");
+            uart_send_string("ERR Syntax: SET_PID <kp> <kd> <ki> [kp_s] [ki_s] [steer] [trim]\r\n");
         }
     }
     else if (strncmp(line, "GET_PID", 7) == 0) {
         float kp, kd, ki, kp_s, ki_s, steer;
         balance_get_pid(&kp, &kd, &ki, &kp_s, &ki_s, &steer);
-        char resp[96];
-        snprintf(resp, sizeof(resp), "PID kp=%.2f kd=%.2f ki=%.2f kp_s=%.2f ki_s=%.2f steer=%.2f\r\n",
-                 kp, kd, ki, kp_s, ki_s, steer);
+        float trim = balance_get_target_offset();
+        char resp[120];
+        snprintf(resp, sizeof(resp), "PID kp=%.2f kd=%.2f ki=%.6f kp_s=%.2f ki_s=%.2f steer=%.2f trim=%.2f\r\n",
+                 kp, kd, ki, kp_s, ki_s, steer, trim);
         uart_send_string(resp);
     }
     else if (strncmp(line, "ARM", 3) == 0) {
@@ -307,7 +311,7 @@ static void send_telemetry(void)
     char buf[360];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"telemetry\",\"seq\":%lu,\"state\":%d,\"fault\":%d,\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
-        "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.2f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
+        "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
         "\"dist_f\":%u,\"tof_mm\":%u,\"bat\":14.8,"
         "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_hw\":%s,\"nrf_link\":%s,\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
         (unsigned long)s_telemetry_seq++, (int)state, (int)fault,
