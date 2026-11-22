@@ -240,6 +240,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
 
     radio_apply_config();
     s_initialized = true;
+    s_last_raw_status = nrf_get_status();
     return true;
 }
 
@@ -260,6 +261,7 @@ void radio_update(uint32_t current_time_ms)
             if (aw == 0x03 && ch == RADIO_CHANNEL) {
                 radio_apply_config();
                 s_initialized = true;
+                s_last_raw_status = nrf_get_status();
             }
         }
         return;
@@ -327,6 +329,10 @@ void radio_update(uint32_t current_time_ms)
                 /* FIFO rỗng (RX_EMPTY) hoặc lỗi SPI */
                 break;
             }
+        }
+
+        if (rx_guard >= 4) {
+            nrf_send_cmd(NRF_CMD_FLUSH_RX);
         }
 
         /* Xóa cờ ngắt RX_DR (và cả TX_DS, MAX_RT nếu có) */

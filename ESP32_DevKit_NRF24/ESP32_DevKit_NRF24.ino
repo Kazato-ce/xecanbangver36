@@ -217,9 +217,9 @@ void setup() {
     s_radio_ok = true;
     radio.setChannel(RADIO_CHANNEL);
     radio.setDataRate(RF24_1MBPS);
-    radio.setPALevel(RF24_PA_LOW);
+    radio.setPALevel(RF24_PA_HIGH);
     radio.setAutoAck(true);
-    radio.setRetries(2, 4);                     // Delay 750us, thử lại 4 lần (~3ms max) -> chống nghẽn delay!
+    radio.setRetries(3, 5);                     // Delay 1000us, thử lại 5 lần (~5ms max) -> cực kỳ ổn định & tin cậy!
     radio.setPayloadSize(sizeof(RadioPacket_t)); // 17 bytes cố định
 
     radio.openWritingPipe(RADIO_ADDR);
@@ -486,6 +486,9 @@ void loop() {
       digitalWrite(PIN_LED, HIGH); // Auto-ACK thành công: LED sáng liên tục
     } else {
       if (s_consecutive_fails < 255) s_consecutive_fails++;
+      if (s_consecutive_fails % 8 == 0) {
+        radio.flush_tx(); // Xóa sạch bộ đệm truyền bị nghẽn để các gói tiếp theo không bị delay
+      }
       if (s_consecutive_fails >= 4) {
         static uint32_t s_last_blink_ms = 0;
         static bool s_blink_state = false;

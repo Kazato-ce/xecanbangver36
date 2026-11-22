@@ -7,7 +7,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Robot Cân Bằng 2 Bánh - ESP32 Mini Controller & NRF Monitor</title>
+  <title>Robot Cân Bằng 2 Bánh - Điều Khiển & Giám Sát Sóng NRF</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -51,7 +51,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
 
     .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
-    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
     .card {
       background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
     }
@@ -73,8 +72,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     .btn-arm:hover, .btn-arm:active { background: #16a34a; }
     .btn-disarm { background: var(--red); color: #fff; }
     .btn-disarm:hover, .btn-disarm:active { background: #dc2626; }
-    .btn-submit { background: var(--accent); color: #0f172a; }
-    .btn-submit:hover { background: var(--accent-hover); }
     .btn-secondary { background: #334155; color: #fff; }
     .btn-secondary:hover { background: #475569; }
 
@@ -141,16 +138,20 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       background: var(--accent); color: #0f172a; font-weight: 700; border-color: var(--accent);
     }
 
-    /* Form PID */
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
-    .field { display: flex; flex-direction: column; gap: 4px; background: #0b1120; padding: 10px; border-radius: 8px; border: 1px solid #1e293b; }
-    label { font-size: 0.85rem; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
-    .field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-    input[type=number] {
-      width: 90px; background: #1e293b; border: 1px solid var(--border); border-radius: 6px;
-      color: #fff; padding: 6px 8px; font-size: 1rem; font-family: monospace; text-align: right;
+    /* Console Log */
+    .log-box {
+      height: 150px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.75rem;
+      color: #93c5fd;
+      line-height: 1.45;
+      background: #020617;
+      border-radius: 6px;
+      padding: 8px 10px;
+      border: 1px solid #1e293b;
     }
-    input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+    .log-box div { margin-bottom: 2px; word-break: break-all; }
 
     .toast {
       position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--accent);
@@ -197,12 +198,12 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     <div class="card" style="border-left: 4px solid var(--green);">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
         <div class="card-title" style="color:var(--green); font-size:0.95rem; font-weight:700; margin:0;">
-          🎮 ĐIỀU KHIỂN CHẠY XE TRỰC TIẾP BẰNG ESP32 MINI (TOUCH / BÀN PHÍM)
+          🎮 ĐIỀU KHIỂN CHẠY XE TRỰC TIẾP BẰNG ESP32 MINI (TOUCH PAD / PHÍM PC)
         </div>
         <span id="driveStatusText" style="font-size:0.85rem; color:var(--accent); font-weight:700;">Sẵn sàng lái</span>
       </div>
       <div style="font-size:0.8rem; color:var(--muted); margin: 6px 0 10px 0;">
-        Giữ nút để xe chạy theo hướng mong muốn, thả tay ra xe sẽ <b>TỰ ĐỘNG DỪNG (STOP)</b> an toàn. Hỗ trợ cả phím W/A/S/D, Mũi tên và Space trên PC!
+        Chạm giữ nút để xe chạy theo 8 hướng mong muốn, thả tay ra xe sẽ <b>TỰ ĐỘNG DỪNG (STOP)</b> an toàn. Hỗ trợ cả phím W/A/S/D, Mũi tên và Space trên máy tính!
       </div>
 
       <!-- Nút ARM / DISARM -->
@@ -259,16 +260,16 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       </div>
     </div>
 
-    <!-- 📡 BẢNG CHẨN ĐOÁN & GIÁM SÁT SÓNG NRF24 (XEM NRF CÓ KẾT NỐI NHẬN LỆNH HAY KHÔNG) -->
+    <!-- 📡 BẢNG CHẨN ĐOÁN & NHẬT KÝ GÓI TIN NHẬN TỪ ESP DEVKIT 1 QUA NRF24 -->
     <div class="card" style="border-left: 4px solid var(--accent);">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
         <div class="card-title" style="color:var(--accent); font-size:0.95rem; font-weight:700; margin:0;">
-          📡 GIÁM SÁT SÓNG TAY CẦM NRF24L01 THỜI GIAN THỰC
+          📡 GIÁM SÁT & NHẬT KÝ GÓI TIN TỪ ESP DEVKIT 1 QUA NRF24L01
         </div>
         <span id="nrfLinkText" style="font-size:0.85rem; font-weight:700; color:var(--yellow);">CHỜ TÍN HIỆU...</span>
       </div>
       <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0 10px 0;">
-        Hiển thị chi tiết số lượng gói tin, mã trạng thái SPI2 và lệnh điều khiển từ tay cầm ESP32 DevKit truyền về STM32.
+        Theo dõi trạng thái chip SPI2, đếm số gói tin nhận được và hiển thị từng gói dữ liệu joystick phát từ ESP32 DevKit 1.
       </div>
 
       <div class="grid-4">
@@ -298,6 +299,22 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           <div style="font-size:0.75rem; color:var(--muted); font-weight:600;">LỆNH TỪ TAY CẦM</div>
           <div id="diagNrfCmdText" style="font-size:0.95rem; font-weight:700; margin-top:4px; color:var(--text);">ĐỨNG YÊN (STOP)</div>
           <div id="diagNrfCmdVal" style="font-size:0.75rem; color:var(--muted); margin-top:2px;">Drive: 0 | Steer: 0</div>
+        </div>
+      </div>
+
+      <!-- Cửa sổ Nhật Ký Gói Tin Thời Gian Thực từ ESP32 DevKit 1 -->
+      <div style="margin-top:12px; background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px 12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:6px;">
+          <span style="font-size:0.8rem; font-weight:700; color:#38bdf8; display:flex; align-items:center; gap:6px;">
+            📜 NHẬT KÝ GÓI TIN NHẬN TỪ ESP DEVKIT 1 (NRF24) THỜI GIAN THỰC
+          </span>
+          <div style="display:flex; gap:6px;">
+            <button style="padding:4px 8px; font-size:0.7rem; background:#1e293b; color:#94a3b8; border-radius:4px; min-width:auto;" onclick="toggleNrfAutoScroll()">Cuộn: <span id="txtAutoScroll">BẬT</span></button>
+            <button style="padding:4px 8px; font-size:0.7rem; background:#1e293b; color:#ef4444; border-radius:4px; min-width:auto;" onclick="clearNrfLog()">Xóa Log</button>
+          </div>
+        </div>
+        <div id="nrfLogConsole" class="log-box">
+          <div style="color:#64748b;">[Đang chờ luồng gói tin NRF từ ESP32 DevKit 1...]</div>
         </div>
       </div>
     </div>
@@ -334,95 +351,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       </div>
       <div class="chart-container">
         <canvas id="chartCanvas"></canvas>
-      </div>
-    </div>
-
-    <!-- Nút Bật/Tắt Bảng Tinh Chỉnh PID (Mặc định ẩn gọn theo yêu cầu) -->
-    <div style="display:flex; justify-content:center;">
-      <button class="btn-secondary" style="max-width:420px; font-size:0.85rem;" onclick="togglePidPanel()">
-        ⚙️ <span id="txtTogglePid">Mở Bảng Tinh Chỉnh PID Nâng Cao (Mặc định ẩn)</span>
-      </button>
-    </div>
-
-    <!-- Form Chỉnh Thông Số PID (Thu gọn/Ẩn khi không cần) -->
-    <div id="panelPid" class="card" style="display:none; border-top: 2px dashed var(--border);">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div class="card-title">🎛️ BẢNG TINH CHỈNH THÔNG SỐ PID THỜI GIAN THỰC</div>
-        <div style="display:flex; gap:6px;">
-          <button class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; min-width:auto;" onclick="applyPreset('soft')">Êm ái</button>
-          <button class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; min-width:auto;" onclick="applyPreset('stiff')">Cứng cáp</button>
-        </div>
-      </div>
-      <div style="font-size: 0.8rem; color: var(--muted); margin-bottom: 8px;">Thay đổi thông số và bấm <b>"Lưu & Cập Nhật"</b>, giá trị sẽ truyền thẳng về STM32 cập nhật ngay lập tức!</div>
-
-      <div class="form-grid">
-        <!-- Kp Góc -->
-        <div class="field">
-          <label>Kp Góc (Độ cứng vững thân xe) <span id="lblKp" style="color:var(--accent);">30</span></label>
-          <div class="field-row">
-            <input type="range" id="rngKp" min="0" max="60" step="0.5" value="30" oninput="syncVal('Kp', this.value)">
-            <input type="number" id="inpKp" step="0.5" min="0" max="100" value="30">
-          </div>
-        </div>
-
-        <!-- Kd Góc -->
-        <div class="field">
-          <label>Kd Góc (Giảm chấn góc - Triệt tiêu rung) <span id="lblKd" style="color:var(--accent);">1.9</span></label>
-          <div class="field-row">
-            <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.9" oninput="syncVal('Kd', this.value)">
-            <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.9">
-          </div>
-        </div>
-
-        <!-- Ki Góc -->
-        <div class="field">
-          <label>Ki Góc (Tích phân góc) <span id="lblKi" style="color:var(--accent);">0.000001</span></label>
-          <div class="field-row">
-            <input type="range" id="rngKi" min="0" max="1.0" step="0.000001" value="0.000001" oninput="syncVal('Ki', this.value)">
-            <input type="number" id="inpKi" step="0.000001" min="0" max="10" value="0.000001">
-          </div>
-        </div>
-
-        <!-- Kp Vận Tốc -->
-        <div class="field">
-          <label>Kp Vận Tốc (Độ nhạy vòng ngoài) <span id="lblKpS" style="color:var(--green);">0.35</span></label>
-          <div class="field-row">
-            <input type="range" id="rngKpS" min="0" max="2.0" step="0.05" value="0.35" oninput="syncVal('KpS', this.value)">
-            <input type="number" id="inpKpS" step="0.05" min="0" max="5.0" value="0.35">
-          </div>
-        </div>
-
-        <!-- Ki Vận Tốc -->
-        <div class="field">
-          <label>Ki Vận Tốc (Khử trôi vị trí) <span id="lblKiS" style="color:var(--green);">0.55</span></label>
-          <div class="field-row">
-            <input type="range" id="rngKiS" min="0" max="2.0" step="0.01" value="0.55" oninput="syncVal('KiS', this.value)">
-            <input type="number" id="inpKiS" step="0.01" min="0" max="5.0" value="0.55">
-          </div>
-        </div>
-
-        <!-- Kp Lái (Steer) -->
-        <div class="field">
-          <label>Kp Lái (Độ nhạy rẽ khi bẻ lái) <span id="lblSteer" style="color:var(--yellow);">1.2</span></label>
-          <div class="field-row">
-            <input type="range" id="rngSteer" min="0" max="3.0" step="0.1" value="1.2" oninput="syncVal('Steer', this.value)">
-            <input type="number" id="inpSteer" step="0.1" min="0" max="5.0" value="1.2">
-          </div>
-        </div>
-
-        <!-- Trim Điểm Cân Bằng Cơ Học -->
-        <div class="field" style="grid-column: 1 / -1;">
-          <label>Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên) <span id="lblTrim" style="color:#f97316;">-0.45</span></label>
-          <div class="field-row">
-            <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="-0.45" oninput="syncVal('Trim', this.value)">
-            <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="-0.45">
-          </div>
-        </div>
-      </div>
-
-      <div class="btn-group" style="margin-top:12px;">
-        <button class="btn-submit" onclick="submitPid()">💾 LƯU & CẬP NHẬT PID SANG STM32</button>
-        <button class="btn-secondary" onclick="loadFromVehicle()">🔄 NẠP LẠI PID TỪ XE</button>
       </div>
     </div>
   </div>
@@ -481,13 +409,9 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       document.getElementById('driveStatusText').innerText = 'Đang chạy: ' + v.name;
       document.getElementById('driveStatusText').style.color = 'var(--accent)';
 
-      // Thêm class active cho phím
       highlightButton(dir, true);
-
-      // Gửi lệnh tức thời
       sendDrivePacket(v.speed, v.steer);
 
-      // Gửi định kỳ 100ms
       if (driveIntervalTimer) clearInterval(driveIntervalTimer);
       driveIntervalTimer = setInterval(() => {
         if (currentDir) {
@@ -550,87 +474,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       }
     });
 
-    function togglePidPanel() {
-      const p = document.getElementById('panelPid');
-      const t = document.getElementById('txtTogglePid');
-      if (p.style.display === 'none' || p.style.display === '') {
-        p.style.display = 'block';
-        t.innerText = "Ẩn Bảng Tinh Chỉnh PID";
-      } else {
-        p.style.display = 'none';
-        t.innerText = "Mở Bảng Tinh Chỉnh PID Nâng Cao (Mặc định ẩn)";
-      }
-    }
-
-    function syncVal(name, val) {
-      const r = document.getElementById('rng' + name);
-      if (r) r.value = val;
-      document.getElementById('inp' + name).value = val;
-      document.getElementById('lbl' + name).innerText = val;
-    }
-
-    document.querySelectorAll('input[type=number]').forEach(inp => {
-      inp.addEventListener('input', e => {
-        const id = e.target.id.replace('inp', '');
-        const r = document.getElementById('rng' + id);
-        if (r) r.value = e.target.value;
-        const l = document.getElementById('lbl' + id);
-        if (l) l.innerText = e.target.value;
-      });
-    });
-
-    function applyPreset(type) {
-      if (type === 'soft') {
-        syncVal('Kp', 18.0);
-        syncVal('Kd', 1.36);
-        syncVal('Ki', 0.0);
-        syncVal('KpS', 0.35);
-        syncVal('KiS', 0.02);
-        syncVal('Steer', 1.20);
-        syncVal('Trim', 0.45);
-        showToast("Đã chọn preset: ÊM ÁI");
-      } else if (type === 'stiff') {
-        syncVal('Kp', 30.0);
-        syncVal('Kd', 1.90);
-        syncVal('Ki', 0.000001);
-        syncVal('KpS', 0.35);
-        syncVal('KiS', 0.55);
-        syncVal('Steer', 1.20);
-        syncVal('Trim', -0.45);
-        showToast("Đã chọn preset: CỨNG CÁP (Mặc định chuẩn)");
-      }
-    }
-
-    let latestTelemetry = null;
-
-    function loadFromVehicle() {
-      if (latestTelemetry) {
-        if (typeof latestTelemetry.kp === 'number') syncVal('Kp', latestTelemetry.kp);
-        if (typeof latestTelemetry.kd === 'number') syncVal('Kd', latestTelemetry.kd);
-        if (typeof latestTelemetry.ki === 'number') syncVal('Ki', latestTelemetry.ki);
-        if (typeof latestTelemetry.kp_s === 'number') syncVal('KpS', latestTelemetry.kp_s);
-        if (typeof latestTelemetry.ki_s === 'number') syncVal('KiS', latestTelemetry.ki_s);
-        if (typeof latestTelemetry.steer === 'number') syncVal('Steer', latestTelemetry.steer);
-        if (typeof latestTelemetry.trim === 'number') syncVal('Trim', latestTelemetry.trim);
-        showToast("Đã nạp thông số hiện tại từ xe vào bảng chỉnh!");
-      }
-    }
-
-    function submitPid() {
-      const kp = document.getElementById('inpKp').value;
-      const kd = document.getElementById('inpKd').value;
-      const ki = document.getElementById('inpKi').value;
-      const kp_s = document.getElementById('inpKpS').value;
-      const ki_s = document.getElementById('inpKiS').value;
-      const steer = document.getElementById('inpSteer').value;
-      const trim = document.getElementById('inpTrim').value;
-
-      fetch(`/api/set_pid?kp=${kp}&kd=${kd}&ki=${ki}&kp_s=${kp_s}&ki_s=${ki_s}&steer=${steer}&trim=${trim}`, { method: 'POST' })
-        .then(r => r.text())
-        .then(res => { showToast("Đã gửi toàn bộ thông số PID sang STM32!"); })
-        .catch(err => { showToast("Lỗi gửi PID: " + err); });
-    }
-
     function sendCmd(act) {
       fetch(`/api/cmd?action=${act}`, { method: 'POST' })
         .then(r => r.text())
@@ -638,7 +481,41 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         .catch(err => { showToast("Lỗi gửi lệnh: " + err); });
     }
 
-    // Chart Canvas setup
+    // ──────────────────────────────────────────────
+    // NHẬT KÝ GÓI TIN NRF24 THỜI GIAN THỰC
+    // ──────────────────────────────────────────────
+    let lastLoggedSeq = -1;
+    let nrfAutoScroll = true;
+    const maxLogEntries = 80;
+
+    function clearNrfLog() {
+      document.getElementById('nrfLogConsole').innerHTML = '<div style="color:#64748b;">[Đã xóa nhật ký...]</div>';
+    }
+
+    function toggleNrfAutoScroll() {
+      nrfAutoScroll = !nrfAutoScroll;
+      document.getElementById('txtAutoScroll').innerText = nrfAutoScroll ? "BẬT" : "TẮT";
+    }
+
+    function appendNrfLog(seq, cmdText, drv, str, st, age) {
+      const consoleEl = document.getElementById('nrfLogConsole');
+      const now = new Date();
+      const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      const row = document.createElement('div');
+      row.innerHTML = `<span style="color:#64748b;">[${timeStr}]</span> <span style="color:#22c55e; font-weight:700;">PKT #${seq}</span> | <span style="color:#38bdf8;">${cmdText}</span> (Drv: ${drv}, Str: ${str}) | <span style="color:#94a3b8;">ST: 0x${st.toString(16).toUpperCase().padStart(2,'0')}</span> | <span style="color:#eab308;">${age}ms</span>`;
+      consoleEl.appendChild(row);
+
+      while (consoleEl.children.length > maxLogEntries) {
+        consoleEl.removeChild(consoleEl.firstChild);
+      }
+      if (nrfAutoScroll) {
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      }
+    }
+
+    // ──────────────────────────────────────────────
+    // ĐỒ THỊ CANVAS THỜI GIAN THỰC
+    // ──────────────────────────────────────────────
     const canvas = document.getElementById('chartCanvas');
     const ctx = canvas.getContext('2d');
     const maxPoints = 120;
@@ -711,7 +588,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         .then(r => r.json())
         .then(d => {
           if (!d) return;
-          latestTelemetry = d;
 
           const pitch = (typeof d.pitch === 'number' && Number.isFinite(d.pitch)) ? d.pitch : 0.0;
           const target = (typeof d.target === 'number' && Number.isFinite(d.target)) ? d.target : 0.0;
@@ -848,36 +724,54 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           const elCmdText = document.getElementById('diagNrfCmdText');
           const elCmdVal  = document.getElementById('diagNrfCmdVal');
           elCmdVal.innerText = `Drive: ${nrfDrv} | Steer: ${nrfStr}`;
+          let cmdName = "ĐỨNG YÊN (STOP)";
+
           if (Math.abs(nrfDrv) < 100 && Math.abs(nrfStr) < 100) {
-            elCmdText.innerText = "ĐỨNG YÊN (STOP)";
+            cmdName = "ĐỨNG YÊN (STOP)";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--muted)";
           } else if (nrfDrv > 150 && Math.abs(nrfStr) < 150) {
-            elCmdText.innerText = "▲ TIẾN THẲNG (+" + nrfDrv + ")";
+            cmdName = "▲ TIẾN THẲNG (+" + nrfDrv + ")";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--accent)";
           } else if (nrfDrv < -150 && Math.abs(nrfStr) < 150) {
-            elCmdText.innerText = "▼ LÙI THẲNG (" + nrfDrv + ")";
+            cmdName = "▼ LÙI THẲNG (" + nrfDrv + ")";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--yellow)";
           } else if (Math.abs(nrfDrv) < 150 && nrfStr < -150) {
-            elCmdText.innerText = "◄ QUAY TRÁI (" + nrfStr + ")";
+            cmdName = "◄ QUAY TRÁI (" + nrfStr + ")";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--purple)";
           } else if (Math.abs(nrfDrv) < 150 && nrfStr > 150) {
-            elCmdText.innerText = "► QUAY PHẢI (+" + nrfStr + ")";
+            cmdName = "► QUAY PHẢI (+" + nrfStr + ")";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--purple)";
           } else if (nrfDrv > 100 && nrfStr < -100) {
-            elCmdText.innerText = "↖ TIẾN - CHÉO TRÁI";
+            cmdName = "↖ TIẾN - CHÉO TRÁI";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--accent)";
           } else if (nrfDrv > 100 && nrfStr > 100) {
-            elCmdText.innerText = "↗ TIẾN - CHÉO PHẢI";
+            cmdName = "↗ TIẾN - CHÉO PHẢI";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--accent)";
           } else if (nrfDrv < -100 && nrfStr < -100) {
-            elCmdText.innerText = "↙ LÙI - CHÉO TRÁI";
+            cmdName = "↙ LÙI - CHÉO TRÁI";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--yellow)";
           } else if (nrfDrv < -100 && nrfStr > 100) {
-            elCmdText.innerText = "↘ LÙI - CHÉO PHẢI";
+            cmdName = "↘ LÙI - CHÉO PHẢI";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--yellow)";
           } else {
-            elCmdText.innerText = "DI CHUYỂN";
+            cmdName = "DI CHUYỂN";
+            elCmdText.innerText = cmdName;
             elCmdText.style.color = "var(--text)";
+          }
+
+          // Ghi vào Nhật ký Stream Log nếu có gói tin mới từ ESP32 DevKit 1
+          if (nrfSeq !== lastLoggedSeq && nrfPkts > 0) {
+            lastLoggedSeq = nrfSeq;
+            appendNrfLog(nrfSeq, cmdName, nrfDrv, nrfStr, nrfSt, nrfAge);
           }
 
           // Cập nhật chart
