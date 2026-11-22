@@ -116,20 +116,24 @@ bool tof_is_valid(void)
 
 void tof_evaluate_cliff(float pitch_deg)
 {
+    /* Nếu cảm biến ToF không gắn / không hợp lệ -> tuyệt đối không báo cliff giả làm xe đứng yên hoặc lùi lùi */
+    if (!s_is_valid || s_distance_mm >= 8000U || s_distance_mm == 0U) {
+        s_cliff_hits = 0;
+        s_cliff_detected = false;
+        s_new_sample = false;
+        return;
+    }
+
     if (!s_new_sample) return;
     s_new_sample = false;
 
     bool raw_cliff = false;
-    if (!s_is_valid || s_distance_mm >= 8000U) {
+    float rad = (TOF_MOUNT_ANGLE_DEG + pitch_deg) * 0.01745329f;
+    float cos_a = cosf(rad);
+    if (cos_a < 0.25f) cos_a = 0.25f;
+    float vertical_mm = (float)s_distance_mm * cos_a;
+    if (vertical_mm > TOF_CLIFF_LIMIT_MM) {
         raw_cliff = true;
-    } else {
-        float rad = (TOF_MOUNT_ANGLE_DEG + pitch_deg) * 0.01745329f;
-        float cos_a = cosf(rad);
-        if (cos_a < 0.25f) cos_a = 0.25f;
-        float vertical_mm = (float)s_distance_mm * cos_a;
-        if (vertical_mm > TOF_CLIFF_LIMIT_MM) {
-            raw_cliff = true;
-        }
     }
 
     if (raw_cliff) {

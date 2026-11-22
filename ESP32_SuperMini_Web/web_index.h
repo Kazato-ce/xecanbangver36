@@ -374,6 +374,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     let currentSpeedScale = 0.40;
     let driveIntervalTimer = null;
     let currentDir = null;
+    let currentVehicleState = 0;
 
     function setDriveSpeed(spd, btn) {
       currentSpeedScale = spd;
@@ -404,6 +405,9 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
     function startDrive(dir, e) {
       if (e) { e.preventDefault(); }
+      if (currentVehicleState !== 3) {
+        showToast("⚠️ Xe chưa ARM! Bấm '⚡ BẬT CÂN BẰNG (ARM)' trước khi lái!");
+      }
       currentDir = dir;
       const v = getDriveVector(dir);
       document.getElementById('driveStatusText').innerText = 'Đang chạy: ' + v.name;
@@ -613,6 +617,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 
           const b = document.getElementById('badgeState');
           const st = d.state || 0;
+          currentVehicleState = st;
           b.innerText = stateNames[st] || "UNKNOWN";
           b.className = "badge " + (stateBadges[st] || "badge-boot");
 

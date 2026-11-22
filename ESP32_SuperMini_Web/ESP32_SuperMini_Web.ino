@@ -198,6 +198,9 @@ void handleDrive() {
 // Các Endpoint HTTP
 // ──────────────────────────────────────────────
 void handleRoot() {
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "-1");
   server.send_P(200, "text/html", PAGE_MAIN);
 }
 

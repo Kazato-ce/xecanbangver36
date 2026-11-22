@@ -279,16 +279,19 @@ void app_timer_control_tick(void)
     }
 
     if (is_armed) {
-        /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection) */
-        if (cliff_detected) {
+        /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection):
+         * CHỈ kích hoạt khi cảm biến ToF thực sự được gắn và đọc hợp lệ */
+        if (cliff_detected && tof_is_valid()) {
             s_navigation_state = NAV_LANE_FOLLOW;
             if (cmd_drive >= 0.0f) {
                 cmd_drive = -0.22f; /* Tự động kích hoạt số lùi khẩn cấp */
             }
         }
 
-        /* Tự động né vật cản & bám làn khi đang chạy thẳng không có lệnh bẻ lái thủ công */
-        if (cmd_drive > 0.05f && fabsf(cmd_steer) < 0.05f && !cliff_detected) {
+        /* Khi người dùng chủ động điều khiển bằng Web D-Pad (UART) hoặc Joystick NRF:
+         * Ưu tiên 100% lệnh của người dùng, không để bám làn tự hành can thiệp đè lệnh */
+        if (!uart_has_drive && !radio_ok && cmd_drive > 0.05f && fabsf(cmd_steer) < 0.05f && !cliff_detected) {
+            /* Tự động né vật cản & bám làn khi ở chế độ xe tự chạy (không có điều khiển thủ công) */
             uint16_t dist_front = 999U;
             uint16_t dist_left = 999U;
             uint16_t dist_right = 999U;
@@ -296,11 +299,11 @@ void app_timer_control_tick(void)
             app_update_navigation(yaw, dist_front, dist_left, dist_right,
                                   &cmd_drive, &cmd_steer);
         } else if (cmd_drive > 0.0f) {
-            /* Giảm tốc an toàn thủ công nếu cảm biến phía trước phát hiện vật cản */
+            /* Giảm tốc an toàn nếu cảm biến phía trước đo được vật cản thực tế gần hơn 25cm */
             uint16_t dist_front = ultrasonic_get_dist_cm(US_FRONT);
-            if (dist_front >= 2 && dist_front < OBSTACLE_STOP_DIST_CM) {
+            if (dist_front >= 5U && dist_front < OBSTACLE_STOP_DIST_CM) {
                 cmd_drive = 0.0f;
-            } else if (dist_front >= 2 && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
+            } else if (dist_front >= 5U && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
                 cmd_drive *= 0.5f;
             }
         }
