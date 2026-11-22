@@ -37,6 +37,12 @@ static bool  s_cmd_arm = false;
 static bool  s_cmd_disarm = false;
 static bool  s_cmd_estop = false;
 
+static uint32_t s_packet_count = 0;
+static uint16_t s_last_seq = 0;
+static int16_t  s_last_raw_drive = 0;
+static int16_t  s_last_raw_steer = 0;
+static uint8_t  s_last_raw_status = 0;
+
 static inline void nrf_delay_us(uint32_t us)
 {
     uint32_t ticks = us * (168000000U / 1000000U);
@@ -208,6 +214,11 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     s_connected = false;
     s_last_packet_ms = 0;
     s_initialized = false;
+    s_packet_count = 0;
+    s_last_seq = 0;
+    s_last_raw_drive = 0;
+    s_last_raw_steer = 0;
+    s_last_raw_status = 0;
 
     ce_low();
     csn_high();
@@ -254,13 +265,26 @@ void radio_update(uint32_t current_time_ms)
         return;
     }
 
-    /* Kiểm tra nhanh trạng thái phần cứng và hàng đợi gói tin qua lệnh NOP (1 byte SPI siêu tốc < 2us) */
-    uint8_t status = nrf_get_status();
-    if (status == 0x00 || status == 0xFF) {
-        s_initialized = false;
-        s_connected = false;
+    /* Giới hạn tần số quét SPI ở mức ~500 Hz (2000 us) để không làm nghẽn bus SPI và triệt tiêu nhiễu cao tần cho khối RF */
+    static uint32_t s_last_poll_cyc = 0;
+    uint32_t now_cyc = DWT->CYCCNT;
+    if ((now_cyc - s_last_poll_cyc) < (2000U * (168000000U / 1000000U))) {
         return;
     }
+    s_last_poll_cyc = now_cyc;
+
+    /* Kiểm tra nhanh trạng thái phần cứng và hàng đợi gói tin qua lệnh NOP */
+    uint8_t status = nrf_get_status();
+    s_last_raw_status = status;
+    static uint8_t s_status_err_count = 0;
+    if (status == 0x00 || status == 0xFF) {
+        if (++s_status_err_count >= 20) {
+            s_initialized = false;
+            s_connected = false;
+        }
+        return;
+    }
+    s_status_err_count = 0;
 
     /* Kiểm tra xem có dữ liệu trong RX FIFO không:
      * - Bit 6 (RX_DR): Cờ ngắt có dữ liệu mới nhận
@@ -277,6 +301,10 @@ void radio_update(uint32_t current_time_ms)
                 if (expected_cs == packet.checksum) {
                     s_last_packet_ms = current_time_ms;
                     s_connected = true;
+                    s_packet_count++;
+                    s_last_seq = packet.seq;
+                    s_last_raw_drive = packet.drive_cmd;
+                    s_last_raw_steer = packet.steer_cmd;
 
                     s_cmd_drive = (float)packet.drive_cmd / 1000.0f; /* Normalization -1.0 .. +1.0 */
                     s_cmd_steer = (float)packet.steer_cmd / 1000.0f;
@@ -321,9 +349,34 @@ bool radio_is_connected(void)
 bool radio_is_hardware_ok(void)
 {
     if (!s_hspi || !s_initialized) return false;
-    uint8_t st = nrf_read_reg(NRF_REG_STATUS);
-    uint8_t ch = nrf_read_reg(NRF_REG_RF_CH);
-    return (st != 0x00 && st != 0xFF && ch == RADIO_CHANNEL);
+    return (s_last_raw_status != 0x00 && s_last_raw_status != 0xFF);
+}
+
+uint32_t radio_get_packet_count(void)
+{
+    return s_packet_count;
+}
+
+uint16_t radio_get_last_seq(void)
+{
+    return s_last_seq;
+}
+
+uint32_t radio_get_last_packet_age_ms(void)
+{
+    if (s_last_packet_ms == 0) return 999999;
+    return HAL_GetTick() - s_last_packet_ms;
+}
+
+void radio_get_raw_commands(int16_t *drive_cmd, int16_t *steer_cmd)
+{
+    if (drive_cmd) *drive_cmd = s_last_raw_drive;
+    if (steer_cmd) *steer_cmd = s_last_raw_steer;
+}
+
+uint8_t radio_get_last_status(void)
+{
+    return s_last_raw_status;
 }
 
 bool radio_check_hardware(uint8_t *status, uint8_t *config, uint8_t *channel)

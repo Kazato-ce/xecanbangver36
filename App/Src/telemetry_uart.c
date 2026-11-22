@@ -303,23 +303,33 @@ static void send_telemetry(void)
     uint32_t imu_err = imu_get_error_count();
     bool nrf_hw = radio_is_hardware_ok();
     bool nrf_link = radio_is_connected();
+    uint32_t nrf_pkts = radio_get_packet_count();
+    uint16_t nrf_seq  = radio_get_last_seq();
+    uint32_t nrf_age  = radio_get_last_packet_age_ms();
+    int16_t  nrf_drv  = 0, nrf_str = 0;
+    radio_get_raw_commands(&nrf_drv, &nrf_str);
+    uint8_t  nrf_st   = radio_get_last_status();
+
     bool spm_ok = telemetry_uart_is_supermini_linked();
     float trim = balance_get_target_offset();
     bool upright = (fabsf(pitch - trim) <= ARM_UPRIGHT_ANGLE_DEG);
     float arm_cd = sm_get_auto_arm_countdown_s();
 
-    char buf[360];
+    char buf[460];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"telemetry\",\"seq\":%lu,\"state\":%d,\"fault\":%d,\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
         "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
         "\"dist_f\":%u,\"tof_mm\":%u,\"bat\":14.8,"
-        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_hw\":%s,\"nrf_link\":%s,\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
+        "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_hw\":%s,\"nrf_link\":%s,"
+        "\"nrf_pkts\":%lu,\"nrf_seq\":%u,\"nrf_age\":%lu,\"nrf_drv\":%d,\"nrf_str\":%d,\"nrf_st\":%u,"
+        "\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
         (unsigned long)s_telemetry_seq++, (int)state, (int)fault,
         pitch, target_pitch, rate,
         left_rpm, right_rpm, kp, kd, ki, kp_s, ki_s, steer, trim,
         (unsigned)dist_f, (unsigned)tof_mm,
         mpu_ok ? "true" : "false", (unsigned long)imu_err,
         nrf_hw ? "true" : "false", nrf_link ? "true" : "false",
+        (unsigned long)nrf_pkts, (unsigned)nrf_seq, (unsigned long)nrf_age, (int)nrf_drv, (int)nrf_str, (unsigned)nrf_st,
         spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd);
 
     uart_send_string(buf);

@@ -63,6 +63,12 @@ struct TelemetryData {
   uint32_t imu_err = 0;
   bool     nrf_hw = false;
   bool     nrf_link = false;
+  uint32_t nrf_pkts = 0;
+  uint16_t nrf_seq = 0;
+  uint32_t nrf_age = 999999;
+  int16_t  nrf_drv = 0;
+  int16_t  nrf_str = 0;
+  uint8_t  nrf_st = 0;
   bool     supermini_ok = false;
   bool     upright = false;
   uint32_t last_rx_ms = 0;
@@ -99,6 +105,12 @@ void parseTelemetryFrame(const String& line) {
     int p_imue   = line.indexOf("\"imu_err\":");
     int p_nrfhw  = line.indexOf("\"nrf_hw\":");
     int p_nrflk  = line.indexOf("\"nrf_link\":");
+    int p_nrfpk  = line.indexOf("\"nrf_pkts\":");
+    int p_nrfsq  = line.indexOf("\"nrf_seq\":");
+    int p_nrfag  = line.indexOf("\"nrf_age\":");
+    int p_nrfdv  = line.indexOf("\"nrf_drv\":");
+    int p_nrfst  = line.indexOf("\"nrf_str\":");
+    int p_nrfraw = line.indexOf("\"nrf_st\":");
     int p_spm    = line.indexOf("\"supermini_ok\":");
     int p_upr    = line.indexOf("\"upright\":");
 
@@ -121,6 +133,12 @@ void parseTelemetryFrame(const String& line) {
     if (p_imue >= 0)   telem.imu_err = (uint32_t)line.substring(p_imue + 10).toInt();
     if (p_nrfhw >= 0)  telem.nrf_hw = (line.substring(p_nrfhw + 9, p_nrfhw + 14).indexOf("true") >= 0);
     if (p_nrflk >= 0)  telem.nrf_link = (line.substring(p_nrflk + 11, p_nrflk + 16).indexOf("true") >= 0);
+    if (p_nrfpk >= 0)  telem.nrf_pkts = (uint32_t)line.substring(p_nrfpk + 11).toInt();
+    if (p_nrfsq >= 0)  telem.nrf_seq  = (uint16_t)line.substring(p_nrfsq + 10).toInt();
+    if (p_nrfag >= 0)  telem.nrf_age  = (uint32_t)line.substring(p_nrfag + 10).toInt();
+    if (p_nrfdv >= 0)  telem.nrf_drv  = (int16_t)line.substring(p_nrfdv + 10).toInt();
+    if (p_nrfst >= 0)  telem.nrf_str  = (int16_t)line.substring(p_nrfst + 10).toInt();
+    if (p_nrfraw >= 0) telem.nrf_st   = (uint8_t)line.substring(p_nrfraw + 9).toInt();
     if (p_spm >= 0)    telem.supermini_ok = (line.substring(p_spm + 15, p_spm + 20).indexOf("true") >= 0);
     if (p_upr >= 0)    telem.upright = (line.substring(p_upr + 10, p_upr + 15).indexOf("true") >= 0);
 
@@ -155,7 +173,25 @@ void sendCmdToStm32(const String& act) {
     StmSerial.print("DISARM\r\n");
     StmSerial.print("{\"type\":\"command\",\"action\":\"disarm\"}\r\n");
     DBG_PRINTLN("[TX to STM32]: DISARM");
+  } else if (act == "stop") {
+    StmSerial.print("STOP\r\n");
+    DBG_PRINTLN("[TX to STM32]: STOP");
   }
+}
+
+void sendDriveToStm32(float speed, float steer) {
+  char cmd[64];
+  snprintf(cmd, sizeof(cmd), "DRIVE %.2f %.2f\r\n", speed, steer);
+  StmSerial.print(cmd);
+  DBG_PRINTF("[TX to STM32]: DRIVE speed=%.2f steer=%.2f\n", speed, steer);
+}
+
+void handleDrive() {
+  float speed = server.hasArg("speed") ? server.arg("speed").toFloat() : 0.0f;
+  float steer = server.hasArg("steer") ? server.arg("steer").toFloat() : 0.0f;
+  sendDriveToStm32(speed, steer);
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "text/plain", "OK");
 }
 
 // ──────────────────────────────────────────────
@@ -167,13 +203,14 @@ void handleRoot() {
 
 void handleGetData() {
   bool stm_link = (telem.last_rx_ms > 0 && (millis() - telem.last_rx_ms < 2000));
-  char json[512];
+  char json[640];
   snprintf(json, sizeof(json),
     "{\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
     "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"state\":%d,\"fault\":%d,"
     "\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
     "\"dist_f\":%u,\"dist_l\":%u,\"dist_r\":%u,\"tof_mm\":%u,\"bat\":%.1f,"
-    "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_hw\":%s,\"nrf_link\":%s,\"upright\":%s}",
+    "\"stm_link\":%s,\"mpu_ok\":%s,\"imu_err\":%u,\"nrf_hw\":%s,\"nrf_link\":%s,\"upright\":%s,"
+    "\"nrf_pkts\":%u,\"nrf_seq\":%u,\"nrf_age\":%u,\"nrf_drv\":%d,\"nrf_str\":%d,\"nrf_st\":%u}",
     telem.pitch, telem.target, telem.rate,
     telem.rpm_l, telem.rpm_r, telem.state, telem.fault,
     telem.kp, telem.kd, telem.ki, telem.kp_s, telem.ki_s, telem.steer, telem.trim,
@@ -183,7 +220,8 @@ void handleGetData() {
     telem.imu_err,
     telem.nrf_hw ? "true" : "false",
     telem.nrf_link ? "true" : "false",
-    telem.upright ? "true" : "false"
+    telem.upright ? "true" : "false",
+    telem.nrf_pkts, telem.nrf_seq, telem.nrf_age, telem.nrf_drv, telem.nrf_str, telem.nrf_st
   );
 
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -295,6 +333,9 @@ void setup() {
   server.on("/api/set_pid", HTTP_POST, handleSetPid);
   server.on("/api/set_pid", HTTP_GET, handleSetPid);
   server.on("/api/cmd", HTTP_POST, handleCmd);
+  server.on("/api/cmd", HTTP_GET, handleCmd);
+  server.on("/api/drive", HTTP_POST, handleDrive);
+  server.on("/api/drive", HTTP_GET, handleDrive);
 
   // Captive Portal
   server.on("/generate_204", handleRoot);
