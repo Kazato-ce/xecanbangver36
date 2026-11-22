@@ -279,8 +279,10 @@ void radio_update(uint32_t current_time_ms)
     uint8_t status = nrf_get_status();
     s_last_raw_status = status;
     static uint8_t s_status_err_count = 0;
-    if (status == 0x00 || status == 0xFF) {
-        if (++s_status_err_count >= 20) {
+
+    /* 0xFF nghĩa là đường MISO bị treo mức cao (đứt dây hoặc mất nguồn module) */
+    if (status == 0xFF) {
+        if (++s_status_err_count >= 50) {
             s_initialized = false;
             s_connected = false;
         }
@@ -290,8 +292,9 @@ void radio_update(uint32_t current_time_ms)
 
     /* Kiểm tra xem có dữ liệu trong RX FIFO không:
      * - Bit 6 (RX_DR): Cờ ngắt có dữ liệu mới nhận
-     * - Bits 3:1 (RX_P_NO): 000 = Pipe 0 có payload; 111 = RX FIFO rỗng */
-    if ((status & 0x40) || (((status >> 1) & 0x07) != 0x07)) {
+     * - Bits 3:1 (RX_P_NO): 000..101 = Pipe 0..5 có payload; 111 (0x07) = RX FIFO rỗng */
+    uint8_t rx_pipe = (status >> 1) & 0x07;
+    if ((status & 0x40) || (rx_pipe < 6)) {
         uint8_t rx_guard = 0;
         while (rx_guard++ < 4) {
             RadioPacket_t packet;
@@ -355,7 +358,7 @@ bool radio_is_connected(void)
 bool radio_is_hardware_ok(void)
 {
     if (!s_hspi || !s_initialized) return false;
-    return (s_last_raw_status != 0x00 && s_last_raw_status != 0xFF);
+    return (s_last_raw_status != 0xFF);
 }
 
 uint32_t radio_get_packet_count(void)
@@ -394,7 +397,7 @@ bool radio_check_hardware(uint8_t *status, uint8_t *config, uint8_t *channel)
     if (status) *status = st;
     if (config) *config = cfg;
     if (channel) *channel = ch;
-    return (st != 0x00 && st != 0xFF && ch == RADIO_CHANNEL);
+    return (st != 0xFF && ch == RADIO_CHANNEL);
 }
 
 void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, bool *disarm_req, bool *estop_req)

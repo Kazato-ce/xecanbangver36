@@ -74,8 +74,8 @@
 #define RADIO_CHANNEL           76      // Kênh RF 2476 MHz (khớp với STM32)
 #define CONTROL_INTERVAL_MS     20      // 50 Hz (20 ms) - Siêu mượt và tức thời!
 
-// Khởi tạo RF24 với tần số SPI 4 MHz
-RF24 radio(PIN_CE, PIN_CSN, 4000000);
+// Khởi tạo RF24 với tần số SPI 2 MHz (Tối ưu chống nhiễu trên dây cắm Dupont)
+RF24 radio(PIN_CE, PIN_CSN, 2000000);
 
 // Địa chỉ pipe giao tiếp 5 byte (khớp với STM32)
 const uint64_t RADIO_ADDR = 0xE7E7E7E7E7ULL;
@@ -191,39 +191,46 @@ void setup() {
   digitalWrite(PIN_CE, LOW);
   delay(50);
 
-  // Khởi tạo SPI cứng
-  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
+  // Khởi tạo SPI cứng cho ESP32
+  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
   delay(50);
 
-  // Thử khởi động module NRF24L01
-  bool ok = radio.begin(&SPI);
+  // Thử khởi động module NRF24L01 (tự động thử lại 5 lần)
+  bool ok = false;
+  for (int attempt = 0; attempt < 5; attempt++) {
+    if (radio.begin(&SPI) || radio.begin()) {
+      ok = true;
+      break;
+    }
+    delay(100);
+  }
 
-  // Kiểm tra thanh ghi STATUS thô qua NOP
-  digitalWrite(PIN_CSN, LOW);
-  delayMicroseconds(10);
-  uint8_t raw_status = SPI.transfer(0xFF);
-  digitalWrite(PIN_CSN, HIGH);
-
-  Serial.printf("[KIỂM TRA SPI] STATUS NRF24: 0x%02X\n", raw_status);
-
-  if (!ok && raw_status != 0x00 && raw_status != 0xFF) {
+  if (!ok && radio.isChipConnected()) {
     ok = true;
   }
 
   if (!ok) {
-    Serial.println("\n[LỖI 🔴] radio.begin() thất bại! Kiểm tra chân SPI NRF24.");
+    Serial.println("\n[LỖI 🔴] radio.begin() thất bại! Kiểm tra chân SPI NRF24:");
+    Serial.println("   VCC -> 3.3V (Có tụ 10uF-100uF)");
+    Serial.println("   GND -> GND");
+    Serial.println("   CE  -> GPIO 4");
+    Serial.println("   CSN -> GPIO 5");
+    Serial.println("   SCK -> GPIO 18");
+    Serial.println("   MISO-> GPIO 19");
+    Serial.println("   MOSI-> GPIO 23\n");
     s_radio_ok = false;
   } else {
     s_radio_ok = true;
     radio.setChannel(RADIO_CHANNEL);
     radio.setDataRate(RF24_1MBPS);
-    radio.setPALevel(RF24_PA_HIGH);
+    radio.setPALevel(RF24_PA_LOW);               // PA_LOW ổn định, không sụt áp nguồn 3.3V USB
     radio.setAutoAck(true);
     radio.setRetries(3, 5);                     // Delay 1000us, thử lại 5 lần (~5ms max) -> cực kỳ ổn định & tin cậy!
     radio.setPayloadSize(sizeof(RadioPacket_t)); // 17 bytes cố định
 
     radio.openWritingPipe(RADIO_ADDR);
     radio.stopListening();                      // Chế độ phát (Transmitter)
+    radio.flush_tx();
 
     digitalWrite(PIN_LED, HIGH);
     delay(500);
@@ -455,7 +462,21 @@ void loop() {
     static uint32_t s_last_err_ms = 0;
     if ((now - s_last_err_ms) >= 2000) {
       s_last_err_ms = now;
-      Serial.println("[LỖI NRF24 🔴] ESP32 không nhận diện module NRF! Kiểm tra dây 3.3V, GND, CE=4, CSN=5, SCK=18, MISO=19, MOSI=23");
+      if (radio.begin(&SPI) || radio.begin()) {
+        s_radio_ok = true;
+        radio.setChannel(RADIO_CHANNEL);
+        radio.setDataRate(RF24_1MBPS);
+        radio.setPALevel(RF24_PA_LOW);
+        radio.setAutoAck(true);
+        radio.setRetries(3, 5);
+        radio.setPayloadSize(sizeof(RadioPacket_t));
+        radio.openWritingPipe(RADIO_ADDR);
+        radio.stopListening();
+        radio.flush_tx();
+        Serial.println("\n[TỰ KẾT NỐI 🟢] Đã nhận diện lại module NRF24L01 thành công!\n");
+      } else {
+        Serial.println("[LỖI NRF24 🔴] ESP32 không nhận diện module NRF! Kiểm tra: 3.3V, GND, CE=4, CSN=5, SCK=18, MISO=19, MOSI=23");
+      }
     }
     return;
   }
@@ -508,11 +529,11 @@ void loop() {
       const char *dir_str = get_direction_8way(s_current_drive, s_current_steer);
 
       if (s_consecutive_fails < 4) {
-        Serial.printf("[SÓNG TỐT 🟢] Gói #%u | %s | Hướng: %s | Tốc độ=%d, Rẽ=%d\n",
+        Serial.printf("[SÓNG TỐT 🟢] Gói #%u | %s | Hướng: %s | Tốc độ=%d, Rẽ=%d (Auto-ACK OK)\n",
                       s_seq, cmd_str, dir_str, s_current_drive, s_current_steer);
       } else {
-        Serial.printf("[CHỜ TÍN HIỆU XE ⏳] Đang phát sóng tìm xe... (Gói #%u) | Hướng: %s | Hãy bật nguồn xe STM32!\n",
-                      s_seq, dir_str);
+        Serial.printf("[ĐANG PHÁT 📡] Đã phát sóng gói #%u | %s | Hướng: %s | Tốc độ=%d | Chờ xe STM32 ACK...\n",
+                      s_seq, cmd_str, dir_str, s_current_drive);
       }
     }
 
