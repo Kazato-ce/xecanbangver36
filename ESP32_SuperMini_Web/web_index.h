@@ -72,8 +72,21 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     .btn-arm:hover, .btn-arm:active { background: #16a34a; }
     .btn-disarm { background: var(--red); color: #fff; }
     .btn-disarm:hover, .btn-disarm:active { background: #dc2626; }
+    .btn-submit { background: var(--accent); color: #0f172a; }
+    .btn-submit:hover { background: var(--accent-hover); }
     .btn-secondary { background: #334155; color: #fff; }
     .btn-secondary:hover { background: #475569; }
+
+    /* Form PID */
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; background: #0b1120; padding: 10px; border-radius: 8px; border: 1px solid #1e293b; }
+    label { font-size: 0.85rem; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+    .field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+    input[type=number] {
+      width: 95px; background: #1e293b; border: 1px solid var(--border); border-radius: 6px;
+      color: #fff; padding: 6px 8px; font-size: 0.95rem; font-family: monospace; text-align: right;
+    }
+    input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; }
 
     /* D-Pad Controller */
     .dpad-container {
@@ -210,6 +223,92 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       <div class="btn-group">
         <button class="btn-arm" onclick="sendCmd('arm')">⚡ BẬT CÂN BẰNG (ARM)</button>
         <button class="btn-disarm" onclick="sendCmd('disarm')">🛑 TẮT ĐỘNG CƠ (DISARM / CẮT KHẨN CẤP)</button>
+      </div>
+
+      <!-- 🎛️ BẢNG ĐIỀU KHIỂN & TINH CHỈNH PID THỜI GIAN THỰC -->
+      <div class="card" style="border: 1px solid var(--border); background: #0b1120; margin-top: 12px; border-radius: 10px; padding: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div class="card-title" style="color:var(--accent); font-size:0.95rem; font-weight:700; margin:0;">
+            🎛️ BẢNG ĐIỀU KHIỂN & TINH CHỈNH PID THỜI GIAN THỰC
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="btn-secondary" style="padding:4px 10px; font-size:0.8rem; min-width:auto;" onclick="applyPreset('soft')">Êm ái</button>
+            <button class="btn-secondary" style="padding:4px 10px; font-size:0.8rem; min-width:auto;" onclick="applyPreset('stiff')">Cứng cáp</button>
+          </div>
+        </div>
+        <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0 10px 0;">
+          Thay đổi thông số và bấm <b>"Lưu & Cập Nhật"</b>, giá trị sẽ truyền thẳng về STM32 cập nhật ngay lập tức mà không cần dừng xe hay nạp lại code!
+        </div>
+
+        <div class="form-grid">
+          <!-- Kp Góc -->
+          <div class="field">
+            <label>Kp Góc (Độ cứng vững thân xe) <span id="lblKp" style="color:var(--accent);">30</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKp" min="0" max="60" step="0.5" value="30" oninput="syncVal('Kp', this.value)">
+              <input type="number" id="inpKp" step="0.5" min="0" max="100" value="30">
+            </div>
+          </div>
+
+          <!-- Kd Góc -->
+          <div class="field">
+            <label>Kd Góc (Giảm chấn góc - Triệt tiêu rung) <span id="lblKd" style="color:var(--accent);">1.9</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.9" oninput="syncVal('Kd', this.value)">
+              <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.9">
+            </div>
+          </div>
+
+          <!-- Ki Góc -->
+          <div class="field">
+            <label>Ki Góc (Tích phân góc) <span id="lblKi" style="color:var(--accent);">0.000001</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKi" min="0" max="1.0" step="0.000001" value="0.000001" oninput="syncVal('Ki', this.value)">
+              <input type="number" id="inpKi" step="0.000001" min="0" max="10" value="0.000001">
+            </div>
+          </div>
+
+          <!-- Kp Vận Tốc -->
+          <div class="field">
+            <label>Kp Vận Tốc (Độ nhạy vòng ngoài) <span id="lblKpS" style="color:var(--green);">0.35</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKpS" min="0" max="5.0" step="0.05" value="0.35" oninput="syncVal('KpS', this.value)">
+              <input type="number" id="inpKpS" step="0.05" min="0" max="10" value="0.35">
+            </div>
+          </div>
+
+          <!-- Ki Vận Tốc -->
+          <div class="field">
+            <label>Ki Vận Tốc (Khử trôi vị trí) <span id="lblKiS" style="color:var(--green);">0.55</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKiS" min="0" max="5.0" step="0.05" value="0.55" oninput="syncVal('KiS', this.value)">
+              <input type="number" id="inpKiS" step="0.05" min="0" max="10" value="0.55">
+            </div>
+          </div>
+
+          <!-- Kp Lái -->
+          <div class="field">
+            <label>Kp Lái (Độ nhạy rẽ khi bẻ lái) <span id="lblSteer" style="color:var(--purple);">1.2</span></label>
+            <div class="field-row">
+              <input type="range" id="rngSteer" min="0" max="5.0" step="0.1" value="1.2" oninput="syncVal('Steer', this.value)">
+              <input type="number" id="inpSteer" step="0.1" min="0" max="10" value="1.2">
+            </div>
+          </div>
+
+          <!-- Trim Góc Đặt -->
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Trim Góc Đặt (Điểm 0 trọng tâm cân bằng tự nhiên) <span id="lblTrim" style="color:var(--yellow);">-0.45</span></label>
+            <div class="field-row">
+              <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="-0.45" oninput="syncVal('Trim', this.value)">
+              <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="-0.45">
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-group" style="margin-top:12px;">
+          <button class="btn-submit" onclick="submitPid()">💾 LƯU & CẬP NHẬT PID SANG STM32</button>
+          <button class="btn-secondary" onclick="loadFromVehicle()">🔄 NẠP LẠI PID TỪ XE</button>
+        </div>
       </div>
 
       <!-- Bàn D-Pad điều khiển 8 hướng -->
@@ -478,6 +577,80 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       }
     });
 
+    // ──────────────────────────────────────────────
+    // XỬ LÝ ĐIỀU CHỈNH & TINH CHỈNH THÔNG SỐ PID
+    // ──────────────────────────────────────────────
+    let latestTelemetry = null;
+
+    function syncVal(name, val) {
+      const r = document.getElementById('rng' + name);
+      if (r) r.value = val;
+      const inp = document.getElementById('inp' + name);
+      if (inp) inp.value = val;
+      const lbl = document.getElementById('lbl' + name);
+      if (lbl) lbl.innerText = val;
+    }
+
+    document.querySelectorAll('input[type=number]').forEach(inp => {
+      inp.addEventListener('input', e => {
+        const id = e.target.id.replace('inp', '');
+        const r = document.getElementById('rng' + id);
+        if (r) r.value = e.target.value;
+        const l = document.getElementById('lbl' + id);
+        if (l) l.innerText = e.target.value;
+      });
+    });
+
+    function applyPreset(type) {
+      if (type === 'soft') {
+        syncVal('Kp', 18.0);
+        syncVal('Kd', 1.36);
+        syncVal('Ki', 0.0);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.02);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', 0.45);
+        showToast("Đã chọn preset: ÊM ÁI");
+      } else if (type === 'stiff') {
+        syncVal('Kp', 30.0);
+        syncVal('Kd', 1.90);
+        syncVal('Ki', 0.000001);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.55);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', -0.45);
+        showToast("Đã chọn preset: CỨNG CÁP (Mặc định chuẩn)");
+      }
+    }
+
+    function loadFromVehicle() {
+      if (latestTelemetry) {
+        if (typeof latestTelemetry.kp === 'number') syncVal('Kp', latestTelemetry.kp);
+        if (typeof latestTelemetry.kd === 'number') syncVal('Kd', latestTelemetry.kd);
+        if (typeof latestTelemetry.ki === 'number') syncVal('Ki', latestTelemetry.ki);
+        if (typeof latestTelemetry.kp_s === 'number') syncVal('KpS', latestTelemetry.kp_s);
+        if (typeof latestTelemetry.ki_s === 'number') syncVal('KiS', latestTelemetry.ki_s);
+        if (typeof latestTelemetry.steer === 'number') syncVal('Steer', latestTelemetry.steer);
+        if (typeof latestTelemetry.trim === 'number') syncVal('Trim', latestTelemetry.trim);
+        showToast("Đã nạp thông số hiện tại từ xe vào bảng chỉnh!");
+      }
+    }
+
+    function submitPid() {
+      const kp = document.getElementById('inpKp').value;
+      const kd = document.getElementById('inpKd').value;
+      const ki = document.getElementById('inpKi').value;
+      const kp_s = document.getElementById('inpKpS').value;
+      const ki_s = document.getElementById('inpKiS').value;
+      const steer = document.getElementById('inpSteer').value;
+      const trim = document.getElementById('inpTrim').value;
+
+      fetch(`/api/set_pid?kp=${kp}&kd=${kd}&ki=${ki}&kp_s=${kp_s}&ki_s=${ki_s}&steer=${steer}&trim=${trim}`, { method: 'POST' })
+        .then(r => r.text())
+        .then(res => { showToast("Đã gửi toàn bộ thông số PID sang STM32!"); })
+        .catch(err => { showToast("Lỗi gửi PID: " + err); });
+    }
+
     function sendCmd(act) {
       fetch(`/api/cmd?action=${act}`, { method: 'POST' })
         .then(r => r.text())
@@ -592,6 +765,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         .then(r => r.json())
         .then(d => {
           if (!d) return;
+          latestTelemetry = d;
 
           const pitch = (typeof d.pitch === 'number' && Number.isFinite(d.pitch)) ? d.pitch : 0.0;
           const target = (typeof d.target === 'number' && Number.isFinite(d.target)) ? d.target : 0.0;

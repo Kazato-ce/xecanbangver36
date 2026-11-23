@@ -1,11 +1,9 @@
 /**
  * @file ESP32_DevKit_NRF24.ino
- * @brief Firmware USB Serial COM & NRF24L01 Dongle Bridge tích hợp 2 Cần gạt Joystick:
+ * @brief Firmware USB Serial COM & NRF24L01 Dongle Bridge tích hợp Cần gạt Joystick 2 trục:
  *        - Đóng vai trò là Cầu nối không dây (Wireless Dongle) kết nối trực tiếp với Máy tính (App Python)
- *        - ĐỒNG THỜI tích hợp 2 Cần gạt Joystick: Cho phép điều khiển xe độc lập khi KHÔNG CÓ MÁY TÍNH
- *        - CẤU HÌNH 2 CẦN:
- *          + [CẦN 1]: ĐIỀU KHIỂN HƯỚNG DI CHUYỂN 8 HƯỚNG (Tiến, Lùi, Rẽ Trái, Rẽ Phải, 4 góc chéo) + Nút SW1: ARM / DISARM
- *          + [CẦN 2]: ĐIỀU CHỈNH TĂNG / GIẢM TỐC ĐỘ (Đẩy lên = Tăng ga 15%..100%, Kéo xuống = Giảm ga) + Nút SW2: Reset 50%
+ *        - ĐỒNG THỜI tích hợp Cần gạt Joystick 2 trục + Nút nhấn: Cho phép điều khiển xe độc lập khi KHÔNG CÓ MÁY TÍNH
+ *        - Hỗ trợ đầy đủ 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải, Lùi-Trái, Lùi-Phải
  *        - Tối ưu hóa chu kỳ phát sóng 20ms (50 Hz) và phát tức thời khi có lệnh/sự kiện (< 2ms delay)
  *        - Cơ chế Hardware Auto-ACK đảm bảo độ tin cậy và chống nghẽn đường truyền
  *
@@ -19,19 +17,13 @@
  *     MOSI   ----->  GPIO 23
  *     MISO   ----->  GPIO 19
  *
- * Sơ đồ đấu nối 2 Cần gạt Joystick vào ESP32 DevKit V1:
- *   [CẦN 1 - ĐIỀU KHIỂN 8 HƯỚNG: TIẾN / LÙI & BẺ LÁI]
- *     VCC                  ----->  3.3V (Chung 3.3V)
- *     GND                  ----->  GND  (Chung GND)
- *     VRX (Trục Tiến/Lùi)  ----->  GPIO 34 (ADC1_CH6 - Input Only)
- *     VRY (Trục Bẻ Lái)    ----->  GPIO 35 (ADC1_CH7 - Input Only)
- *     SW1 (Nút nhấn Cần 1) ----->  GPIO 32 (Ấn ngắn: ARM / DISARM | Ấn giữ >1s: ESTOP)
- *
- *   [CẦN 2 - ĐIỀU CHỈNH TĂNG / GIẢM TỐC ĐỘ GA]
- *     VCC                  ----->  3.3V (Chung 3.3V)
- *     GND                  ----->  GND  (Chung GND)
- *     VRX / VRY (Trục dọc) ----->  GPIO 39 / VN (ADC1_CH3 - Input Only)
- *     SW2 (Nút nhấn Cần 2) ----->  GPIO 33 (Ấn ngắn: Reset tốc độ về 50% | Ấn giữ: ESTOP)
+ * Sơ đồ đấu nối Cần gạt Joystick 2 trục (34, 35, 32):
+ *   Joystick Module  ESP32 DevKit V1
+ *     VCC    ----->  3.3V (Bắt buộc dùng 3.3V để điện áp ADC không vượt ngưỡng)
+ *     GND    ----->  GND
+ *     VRX    ----->  GPIO 34 (Trục Tiến / Lùi - Input Only, ADC1_CH6)
+ *     VRY    ----->  GPIO 35 (Trục Bẻ Lái Trái/Phải - Input Only, ADC1_CH7)
+ *     SW     ----->  GPIO 32 (Nút bấm ấn trục xuống: Ấn ngắn ARM/DISARM | Giữ >1s ESTOP)
  */
 
 #include <SPI.h>
@@ -48,13 +40,9 @@
   #define PIN_SCK                 12
   #define PIN_MISO                13
   #define PIN_MOSI                11
-  // Cần 1 (8 Hướng di chuyển)
-  #define PIN_JOY1_VRX            1     // Cần 1: Trục Tiến / Lùi (ADC1_CH0)
-  #define PIN_JOY1_VRY            2     // Cần 1: Trục Bẻ Lái (ADC1_CH1)
-  #define PIN_JOY1_SW             4     // Nút nhấn Cần 1: ARM / DISARM
-  // Cần 2 (Tăng / Giảm Tốc độ)
-  #define PIN_JOY2_VRX            5     // Cần 2: Trục Tăng / Giảm tốc độ
-  #define PIN_JOY2_SW             6     // Nút nhấn Cần 2: Reset tốc độ & ESTOP
+  #define PIN_JOY_VRX             1     // ADC1_CH0
+  #define PIN_JOY_VRY             2     // ADC1_CH1
+  #define PIN_JOY_SW              4     // Nút nhấn
 #elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV) || defined(ESP32C3)
   #define PIN_CE                  4
   #define PIN_CSN                 5
@@ -62,13 +50,9 @@
   #define PIN_SCK                 6
   #define PIN_MISO                7
   #define PIN_MOSI                10
-  // Cần 1 (8 Hướng di chuyển)
-  #define PIN_JOY1_VRX            0     // Cần 1: Trục Tiến / Lùi (ADC1_CH0)
-  #define PIN_JOY1_VRY            1     // Cần 1: Trục Bẻ Lái (ADC1_CH1)
-  #define PIN_JOY1_SW             2     // Nút nhấn Cần 1: ARM / DISARM
-  // Cần 2 (Tăng / Giảm Tốc độ)
-  #define PIN_JOY2_VRX            3     // Cần 2: Trục Tăng / Giảm tốc độ
-  #define PIN_JOY2_SW             4     // Nút nhấn Cần 2: Reset tốc độ & ESTOP
+  #define PIN_JOY_VRX             0     // ADC1_CH0
+  #define PIN_JOY_VRY             1     // ADC1_CH1
+  #define PIN_JOY_SW              2     // Nút nhấn
 #else
   // Cấu hình chuẩn ESP32 DevKit V1 (30 chân / 36 chân WROOM-32)
   #define PIN_CE                  4
@@ -77,23 +61,10 @@
   #define PIN_SCK                 18
   #define PIN_MISO                19
   #define PIN_MOSI                23
-  // [CẦN 1]: ĐIỀU KHIỂN TIẾN / LÙI & BẺ LÁI TRÁI / PHẢI (8 HƯỚNG)
-  #define PIN_JOY1_VRX            34    // Trục Tiến / Lùi (VRX1 - GPIO 34, ADC1_CH6)
-  #define PIN_JOY1_VRY            35    // Trục Bẻ Lái Trái / Phải (VRY1 - GPIO 35, ADC1_CH7)
-  #define PIN_JOY1_SW             32    // Nút nhấn Cần 1: ARM / DISARM (SW1 nối GPIO 32)
-  // [CẦN 2]: TĂNG / GIẢM TỐC ĐỘ (SPEED THROTTLE LIMITER)
-  #define PIN_JOY2_VRX            39    // Trục Tăng / Giảm tốc độ (VRX2 - GPIO 39 / VN, ADC1_CH3)
-  #define PIN_JOY2_SW             33    // Nút nhấn Cần 2: Reset tốc độ về 50% & ESTOP (SW2 nối GPIO 33)
+  #define PIN_JOY_VRX             34    // Trục Tiến / Lùi (VRX nối GPIO 34, ADC1_CH6)
+  #define PIN_JOY_VRY             35    // Trục Bẻ Lái Trái / Phải (VRY nối GPIO 35, ADC1_CH7)
+  #define PIN_JOY_SW              32    // Nút bấm ấn trục Joystick (SW nối GPIO 32)
 #endif
-
-// Tương thích ngược với tên chân cũ (1 cần 2 trục)
-#define PIN_JOY_VRX             PIN_JOY1_VRX
-#define PIN_JOY_VRY             PIN_JOY1_VRY
-#define PIN_JOY_SW              PIN_JOY1_SW
-#define PIN_JOY_SPEED           PIN_JOY1_VRX
-#define PIN_JOY_STEER           PIN_JOY1_VRY
-#define PIN_JOY_SW1             PIN_JOY1_SW
-#define PIN_JOY_SW2             PIN_JOY2_SW
 
 // Tùy chọn đảo chiều nếu người dùng lắp ngược hướng cần gạt Joystick
 #define JOY_INVERT_DRIVE        false   // Đặt true nếu gạt tới xe bị lùi
@@ -122,19 +93,13 @@ static int16_t s_current_steer = 0;     // -1000..1000
 static ProtocolCmd_t s_pending_cmd = CMD_DISARM;
 static uint8_t s_consecutive_fails = 0;
 
-// Trạng thái 2 Cần Joystick
+// Trạng thái Joystick (1 Cần gạt 2 trục: GPIO 34, 35, 32)
 static bool s_joystick_detected = false;
-static bool s_joy1_detected = false;
-static bool s_joy2_detected = false;
-static int  s_joy1_center_x = 2048;      // Tâm Cần 1 (Tiến / Lùi)
-static int  s_joy1_center_y = 2048;      // Tâm Cần 1 (Bẻ Lái)
-static int  s_joy2_center_x = 2048;      // Tâm Cần 2 (Tăng / Giảm tốc độ)
+static int  s_joy_center_x = 2048;      // Tâm Tiến / Lùi (GPIO 34)
+static int  s_joy_center_y = 2048;      // Tâm Bẻ Lái (GPIO 35)
 static bool s_joy_active = false;
-static uint32_t s_sw1_press_time_ms = 0;
-static bool s_sw1_last_state = HIGH;
-static uint32_t s_sw2_press_time_ms = 0;
-static bool s_sw2_last_state = HIGH;
-static int  s_speed_limit_pct = 60;      // Tốc độ tối đa hiện tại (15% .. 100%, mặc định 60%)
+static uint32_t s_sw_press_time_ms = 0;
+static bool s_sw_last_state = HIGH;
 
 static String s_serial_rx = "";
 
@@ -153,16 +118,12 @@ const char* get_direction_8way(int drive, int steer) {
 
 void printMenu(void) {
   Serial.println("\n========================================================");
-  Serial.println("  ESP32 DevKit V1 ↔ 2-Joystick Controller (8-Way + Speed)");
+  Serial.println("  ESP32 DevKit V1 ↔ NRF24L01 Dongle & 8-Way Joystick");
   Serial.println("========================================================");
-  Serial.println("1. Kết nối 2 Cần gạt Joystick (1 Cần 8 Hướng + 1 Cần Tốc Độ):");
-  Serial.println("   [CẦN 1 - ĐIỀU KHIỂN 8 HƯỚNG]:");
-  Serial.println("     - VRX -> GPIO 34 (Tiến / Lùi)");
-  Serial.println("     - VRY -> GPIO 35 (Bẻ Lái Trái / Phải)");
-  Serial.println("     - SW1 -> GPIO 32 (Ấn ngắn: ARM/DISARM | Giữ >1s: ESTOP)");
-  Serial.println("   [CẦN 2 - TĂNG / GIẢM TỐC ĐỘ]:");
-  Serial.println("     - VRX -> GPIO 39 (Đẩy lên: Tăng tốc | Kéo xuống: Giảm tốc)");
-  Serial.println("     - SW2 -> GPIO 33 (Ấn ngắn: Reset tốc độ về 50%)");
+  Serial.println("1. Kết nối Cần gạt Joystick 2 trục (34, 35, 32):");
+  Serial.println("   - VRX  -> GPIO 34 (Tiến / Lùi)");
+  Serial.println("   - VRY  -> GPIO 35 (Bẻ Lái Trái / Phải)");
+  Serial.println("   - SW   -> GPIO 32 (Ấn ngắn: ARM/DISARM | Giữ >1s: ESTOP)");
   Serial.println("2. Lệnh qua USB Serial COM (115200 baud cho App Python):");
   Serial.println("   'ARM' / 'X' : ARM xe (bật cân bằng)");
   Serial.println("   'DISARM'/'Z': DISARM xe (tắt động cơ)");
@@ -173,55 +134,32 @@ void printMenu(void) {
   Serial.println("   'q' / 'e'   : Tiến-Trái / Tiến-Phải (Đi chéo)");
   Serial.println("   'z' / 'c'   : Lùi-Trái  / Lùi-Phải  (Đi chéo)");
   Serial.println("   ' ' (Space) : Phanh dừng tốc độ 0");
-  Serial.println("   'JOY CAL'   : Hiệu chuẩn lại tâm 2 Cần Joystick");
+  Serial.println("   'JOY CAL'   : Hiệu chuẩn lại tâm Joystick");
   Serial.println("========================================================\n");
 }
 
 void calibrateJoystick(void) {
-  long sum1_x = 0;
-  long sum1_y = 0;
-  long sum2_x = 0;
+  long sum_x = 0;
+  long sum_y = 0;
   const int SAMPLES = 32;
 
   for (int i = 0; i < SAMPLES; i++) {
-    sum1_x += analogRead(PIN_JOY1_VRX);
-    sum1_y += analogRead(PIN_JOY1_VRY);
-    sum2_x += analogRead(PIN_JOY2_VRX);
+    sum_x += analogRead(PIN_JOY_VRX);
+    sum_y += analogRead(PIN_JOY_VRY);
     delay(5);
   }
 
-  int avg1_x = sum1_x / SAMPLES;
-  int avg1_y = sum1_y / SAMPLES;
-  int avg2_x = sum2_x / SAMPLES;
+  int avg_x = sum_x / SAMPLES;
+  int avg_y = sum_y / SAMPLES;
 
-  // Hiệu chuẩn Cần 1 (Tiến/Lùi & Bẻ Lái - GPIO 34 & 35)
-  if (avg1_x > 1000 && avg1_x < 3000 && avg1_y > 1000 && avg1_y < 3000) {
-    s_joy1_detected = true;
-    s_joy1_center_x = avg1_x;
-    s_joy1_center_y = avg1_y;
+  if (avg_x > 1000 && avg_x < 3000 && avg_y > 1000 && avg_y < 3000) {
+    s_joystick_detected = true;
+    s_joy_center_x = avg_x;
+    s_joy_center_y = avg_y;
+    Serial.printf("[JOYSTICK 🟢] Đã nhận diện Joystick (34, 35, 32)! Tâm chuẩn: X=%d (Tiến/Lùi), Y=%d (Bẻ Lái)\n", avg_x, avg_y);
   } else {
-    s_joy1_detected = false;
-  }
-
-  // Hiệu chuẩn Cần 2 (Tăng / Giảm Tốc Độ - GPIO 39)
-  if (avg2_x > 1000 && avg2_x < 3000) {
-    s_joy2_detected = true;
-    s_joy2_center_x = avg2_x;
-  } else {
-    s_joy2_detected = false;
-  }
-
-  s_joystick_detected = s_joy1_detected;
-
-  if (s_joy1_detected && s_joy2_detected) {
-    Serial.println("[2 JOYSTICKS 🟢] Nhận diện ĐỦ 2 CẦN!");
-    Serial.printf("   + Cần 1 (8 Hướng Lái): X=%d (Tiến/Lùi), Y=%d (Bẻ Lái) - GPIO 34 & 35\n", avg1_x, avg1_y);
-    Serial.printf("   + Cần 2 (Tăng/Giảm Ga): Tâm=%d - GPIO 39\n", avg2_x);
-    Serial.printf("   + Tốc độ giới hạn hiện tại: %d%%\n", s_speed_limit_pct);
-  } else if (s_joy1_detected) {
-    Serial.printf("[1 JOYSTICK 🟢] Nhận diện Cần 1 (8 Hướng: X=%d, Y=%d), Cần 2 chưa cắm (Tốc độ mặc định %d%%)\n", avg1_x, avg1_y, s_speed_limit_pct);
-  } else {
-    Serial.printf("[JOYSTICK ℹ️] Không phát hiện Joystick -> Sử dụng USB Serial COM làm kênh chính.\n");
+    s_joystick_detected = false;
+    Serial.printf("[JOYSTICK ℹ️] Không phát hiện Joystick (X=%d, Y=%d) -> Sử dụng USB Serial COM làm kênh chính.\n", avg_x, avg_y);
   }
 }
 
@@ -230,21 +168,10 @@ void setup() {
   delay(100);
 
   pinMode(PIN_LED, OUTPUT);
-  pinMode(PIN_JOY1_SW, INPUT_PULLUP);
-  pinMode(PIN_JOY2_SW, INPUT_PULLUP);
+  pinMode(PIN_JOY_SW, INPUT_PULLUP);
 
   // Chớp LED xác nhận khởi động
   for (int i = 0; i < 3; i++) {
-    digitalWrite(PIN_LED, HIGH);
-    delay(80);
-    digitalWrite(PIN_LED, LOW);
-    delay(80);
-  }
-    digitalWrite(PIN_LED, HIGH);
-    delay(80);
-    digitalWrite(PIN_LED, LOW);
-    delay(80);
-  }
     digitalWrite(PIN_LED, HIGH);
     delay(80);
     digitalWrite(PIN_LED, LOW);
@@ -401,119 +328,62 @@ void processCommandLine(String line) {
   } else if (line.equalsIgnoreCase("PING")) {
     Serial.println("PONG: MODE=BRIDGE_JOYSTICK, RADIO_OK=1");
   } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("CHECK")) {
-    Serial.println("\n--- [TRẠNG THÁI ESP32 DONGLE & 2 JOYSTICKS] ---");
+    Serial.println("\n--- [TRẠNG THÁI ESP32 DONGLE & JOYSTICK] ---");
     Serial.printf(" 1. NRF24L01 Phần cứng : %s (Kênh 76 @ 1Mbps)\n", s_radio_ok ? "🟢 SẴN SÀNG" : "🔴 LỖI SPI");
     Serial.printf(" 2. Sóng xe STM32       : %s\n", (s_consecutive_fails < 4) ? "🟢 ĐÃ KẾT NỐI (Auto-ACK OK)" : "🟡 CHỜ XE BẬT NGUỒN");
-    Serial.printf(" 3. Cần 1 (8 Hướng Lái) : %s (X_center=%d, Y_center=%d)\n", s_joy1_detected ? "🟢 ĐÃ KẾT NỐI" : "⚪ CHƯA CẮM", s_joy1_center_x, s_joy1_center_y);
-    Serial.printf(" 4. Cần 2 (Tăng/Giảm Ga): %s (GPIO 39, Tâm = %d)\n", s_joy2_detected ? "🟢 ĐÃ KẾT NỐI" : "⚪ CHƯA CẮM", s_joy2_center_x);
-    Serial.printf(" 5. Tốc độ tối đa hiện tại: %d%%\n", s_speed_limit_pct);
-    Serial.printf(" 6. Hướng & Lệnh        : %s | Tốc độ=%d | Bẻ lái=%d\n", get_direction_8way(s_current_drive, s_current_steer), s_current_drive, s_current_steer);
-    Serial.println("------------------------------------------------\n");
+    Serial.printf(" 3. Cần gạt Joystick   : %s (VRX=GPIO 34 Tâm=%d, VRY=GPIO 35 Tâm=%d)\n", s_joystick_detected ? "🟢 ĐÃ KẾT NỐI" : "⚪ CHƯA CẮM", s_joy_center_x, s_joy_center_y);
+    Serial.printf(" 4. Hướng & Lệnh       : %s | Tốc độ=%d | Bẻ lái=%d\n", get_direction_8way(s_current_drive, s_current_steer), s_current_drive, s_current_steer);
+    Serial.println("--------------------------------------------\n");
   } else if (line == "?") {
     printMenu();
   }
 }
 
 void handleJoystick(void) {
-  if (!s_joystick_detected && !s_joy2_detected) return;
+  if (!s_joystick_detected) return;
 
   uint32_t now = millis();
 
-  // 1. Xử lý nút nhấn SW1 (Cần 1 - ARM/DISARM - GPIO 32)
-  bool sw1_state = digitalRead(PIN_JOY1_SW);
-  if (sw1_state == LOW && s_sw1_last_state == HIGH) {
-    s_sw1_press_time_ms = now;
-  } else if (sw1_state == HIGH && s_sw1_last_state == LOW) {
-    uint32_t press_duration = now - s_sw1_press_time_ms;
+  // 1. Xử lý nút nhấn SW của Joystick (GPIO 32)
+  bool sw_state = digitalRead(PIN_JOY_SW);
+  if (sw_state == LOW && s_sw_last_state == HIGH) {
+    s_sw_press_time_ms = now;
+  } else if (sw_state == HIGH && s_sw_last_state == LOW) {
+    uint32_t press_duration = now - s_sw_press_time_ms;
     if (press_duration >= 50 && press_duration < 1000) {
       // Ấn ngắn: Đổi trạng thái ARM <-> DISARM
       if (s_pending_cmd == CMD_ARM || s_pending_cmd == CMD_DRIVE) {
         s_pending_cmd = CMD_DISARM;
         s_current_drive = 0;
         s_current_steer = 0;
-        Serial.println("[NÚT CẦN 1] -> DISARM XE (Tắt động cơ)");
+        Serial.println("[NÚT JOYSTICK (GPIO 32)] -> DISARM XE (Tắt động cơ)");
       } else {
         s_pending_cmd = CMD_ARM;
-        Serial.println("[NÚT CẦN 1] -> ARM XE (Bật cân bằng)");
+        Serial.println("[NÚT JOYSTICK (GPIO 32)] -> ARM XE (Bật cân bằng)");
       }
       s_force_tx_immediate = true;
     } else if (press_duration >= 1000) {
-      // Ấn giữ > 1 giây: DỪNG KHẨN CẤP
+      // Ấn giữ > 1 giây: DỪNG KHẨN CẤP (ESTOP)
       s_pending_cmd = CMD_ESTOP;
       s_current_drive = 0;
       s_current_steer = 0;
       s_force_tx_immediate = true;
-      Serial.println("[NÚT CẦN 1] -> DỪNG KHẨN CẤP (ESTOP)!");
+      Serial.println("[NÚT JOYSTICK (GPIO 32)] -> DỪNG KHẨN CẤP (ESTOP)!");
     }
   }
-  s_sw1_last_state = sw1_state;
+  s_sw_last_state = sw_state;
 
-  // 2. Xử lý nút nhấn SW2 (Cần 2 - Reset tốc độ - GPIO 33)
-  bool sw2_state = digitalRead(PIN_JOY2_SW);
-  if (sw2_state == LOW && s_sw2_last_state == HIGH) {
-    s_sw2_press_time_ms = now;
-  } else if (sw2_state == HIGH && s_sw2_last_state == LOW) {
-    uint32_t press_duration2 = now - s_sw2_press_time_ms;
-    if (press_duration2 >= 50 && press_duration2 < 1000) {
-      // Ấn ngắn: Đặt lại tốc độ về 50%
-      s_speed_limit_pct = 50;
-      Serial.println("[NÚT CẦN 2] -> Đã Reset tốc độ về mức chuẩn: 50%!");
-      digitalWrite(PIN_LED, HIGH);
-      delay(80);
-      digitalWrite(PIN_LED, LOW);
-    } else if (press_duration2 >= 1000) {
-      s_pending_cmd = CMD_ESTOP;
-      s_current_drive = 0;
-      s_current_steer = 0;
-      s_force_tx_immediate = true;
-      Serial.println("[NÚT CẦN 2] -> DỪNG KHẨN CẤP (ESTOP)!");
-    }
-  }
-  s_sw2_last_state = sw2_state;
-
-  // 3. Xử lý CẦN 2: TĂNG / GIẢM TỐC ĐỘ (Đẩy lên = Tăng ga, Kéo xuống = Giảm ga)
-  if (s_joy2_detected) {
-    int raw_spd_stick = 0;
-    for (int i = 0; i < 4; i++) {
-      raw_spd_stick += analogRead(PIN_JOY2_VRX);
-    }
-    raw_spd_stick /= 4;
-
-    int diff_spd = raw_spd_stick - s_joy2_center_x;
-    static uint32_t s_last_speed_adjust_ms = 0;
-
-    if (abs(diff_spd) > JOY_DEADBAND) {
-      // Điều chỉnh tốc độ mượt mà mỗi 60ms
-      if ((now - s_last_speed_adjust_ms) >= 60) {
-        s_last_speed_adjust_ms = now;
-        int step = (abs(diff_spd) > 1200) ? 3 : 1; // Gạt mạnh tăng/giảm nhanh hơn
-        if (diff_spd > 0) {
-          s_speed_limit_pct = min(100, s_speed_limit_pct + step);
-        } else {
-          s_speed_limit_pct = max(15, s_speed_limit_pct - step);
-        }
-        static int s_last_printed_pct = 0;
-        if (abs(s_speed_limit_pct - s_last_printed_pct) >= 5) {
-          s_last_printed_pct = s_speed_limit_pct;
-          Serial.printf("[CẦN 2 🎚️] Tốc độ tối đa hiện tại: %d%%\n", s_speed_limit_pct);
-        }
-      }
-    }
-  }
-
-  // 4. Xử lý CẦN 1: ĐIỀU KHIỂN TIẾN/LÙI & BẺ LÁI (8 HƯỚNG)
-  if (!s_joy1_detected) return;
-
+  // 2. Đọc 4 mẫu analog để triệt tiêu nhiễu jitter ADC
   int raw_x = 0, raw_y = 0;
   for (int i = 0; i < 4; i++) {
-    raw_x += analogRead(PIN_JOY1_VRX);
-    raw_y += analogRead(PIN_JOY1_VRY);
+    raw_x += analogRead(PIN_JOY_VRX);
+    raw_y += analogRead(PIN_JOY_VRY);
   }
   raw_x /= 4;
   raw_y /= 4;
 
-  int diff_x = raw_x - s_joy1_center_x; // Cần 1: Trục Tiến / Lùi
-  int diff_y = raw_y - s_joy1_center_y; // Cần 1: Trục Bẻ Lái Trái / Phải
+  int diff_x = raw_x - s_joy_center_x; // Trục Tiến / Lùi (GPIO 34)
+  int diff_y = raw_y - s_joy_center_y; // Trục Bẻ Lái Trái / Phải (GPIO 35)
 
   if (JOY_INVERT_DRIVE) diff_x = -diff_x;
   if (JOY_INVERT_STEER) diff_y = -diff_y;
@@ -537,13 +407,10 @@ void handleJoystick(void) {
     }
   }
 
-  // Áp dụng trần tốc độ do CẦN 2 quy định (15% .. 100%)
-  float speed_factor = (float)s_speed_limit_pct / 100.0f;
-  joy_drive = (int)(joy_drive * speed_factor);
   joy_drive = constrain(joy_drive, -1000, 1000);
   joy_steer = constrain(joy_steer, -1000, 1000);
 
-  // Giới hạn vector hình tròn (Circle clamp) khi đi chéo
+  // Giới hạn vector hình tròn (Circle clamp) khi đi chéo góc 45 độ
   float mag = sqrtf((float)joy_drive * joy_drive + (float)joy_steer * joy_steer);
   if (mag > 1000.0f) {
     joy_drive = (int)(joy_drive * 1000.0f / mag);

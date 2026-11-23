@@ -1,0 +1,963 @@
+﻿<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Robot CÃ¢n Báº±ng 2 BÃ¡nh - Äiá»u Khiá»ƒn & GiÃ¡m SÃ¡t SÃ³ng NRF</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .container { width: 100%; max-width: 960px; display: flex; flex-direction: column; gap: 12px; }
+    header {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 12px 18px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+    }
+    h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); }
+    .badge {
+      padding: 5px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .badge-boot { background: #475569; color: #fff; }
+    .badge-calib { background: var(--yellow); color: #000; }
+    .badge-disarmed { background: #f97316; color: #fff; }
+    .badge-armed { background: var(--green); color: #fff; animation: pulse 1.5s infinite; }
+    .badge-fault { background: var(--red); color: #fff; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
+
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+    }
+    .card-title { font-size: 0.85rem; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .val-large { font-size: 1.85rem; font-weight: 700; }
+    .val-unit { font-size: 0.9rem; color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+    /* Canvas chart */
+    .chart-container { position: relative; width: 100%; height: 180px; background: #0b1120; border-radius: 8px; overflow: hidden; margin-top: 8px; }
+    canvas { width: 100%; height: 100%; display: block; }
+
+    /* Buttons */
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+    button {
+      flex: 1; min-width: 120px; padding: 12px 14px; border: none; border-radius: 8px;
+      font-weight: 700; font-size: 0.95rem; cursor: pointer; transition: 0.15s;
+    }
+    .btn-arm { background: var(--green); color: #fff; }
+    .btn-arm:hover, .btn-arm:active { background: #16a34a; }
+    .btn-disarm { background: var(--red); color: #fff; }
+    .btn-disarm:hover, .btn-disarm:active { background: #dc2626; }
+    .btn-submit { background: var(--accent); color: #0f172a; }
+    .btn-submit:hover { background: var(--accent-hover); }
+    .btn-secondary { background: #334155; color: #fff; }
+    .btn-secondary:hover { background: #475569; }
+
+    /* Form PID */
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; background: #0b1120; padding: 10px; border-radius: 8px; border: 1px solid #1e293b; }
+    label { font-size: 0.85rem; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+    .field-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+    input[type=number] {
+      width: 95px; background: #1e293b; border: 1px solid var(--border); border-radius: 6px;
+      color: #fff; padding: 6px 8px; font-size: 0.95rem; font-family: monospace; text-align: right;
+    }
+    input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+
+    /* D-Pad Controller */
+    .dpad-container {
+      display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: 10px;
+    }
+    .dpad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 85px);
+      grid-template-rows: repeat(3, 75px);
+      gap: 8px;
+      justify-content: center;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .dpad-btn {
+      background: #0b1120;
+      border: 2px solid var(--border);
+      border-radius: 12px;
+      color: #fff;
+      font-size: 1.35rem;
+      font-weight: 700;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.1s ease;
+      touch-action: none;
+      padding: 0;
+      min-width: auto;
+    }
+    .dpad-btn:active, .dpad-btn.active {
+      background: var(--accent);
+      color: #0f172a;
+      transform: scale(0.94);
+      border-color: #fff;
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.6);
+    }
+    .dpad-btn-stop {
+      background: #7f1d1d;
+      border-color: #ef4444;
+      color: #fca5a5;
+    }
+    .dpad-btn-stop:active, .dpad-btn-stop.active {
+      background: #dc2626;
+      color: #fff;
+    }
+    .dpad-sub {
+      font-size: 0.65rem;
+      font-weight: 600;
+      margin-top: 2px;
+      text-transform: uppercase;
+    }
+    .speed-selector {
+      display: flex; gap: 6px; justify-content: center; align-items: center; width: 100%; max-width: 420px; margin-top: 4px;
+    }
+    .speed-btn {
+      flex: 1; padding: 6px 8px; font-size: 0.8rem; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); cursor: pointer; min-width: auto;
+    }
+    .speed-btn.active {
+      background: var(--accent); color: #0f172a; font-weight: 700; border-color: var(--accent);
+    }
+
+    /* Console Log */
+    .log-box {
+      height: 150px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.75rem;
+      color: #93c5fd;
+      line-height: 1.45;
+      background: #020617;
+      border-radius: 6px;
+      padding: 8px 10px;
+      border: 1px solid #1e293b;
+    }
+    .log-box div { margin-bottom: 2px; word-break: break-all; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--accent);
+      color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 0.9rem; display: none;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 999;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div>
+        <h1>STM32F405 â†” ESP32 Web Dashboard</h1>
+        <div style="font-size: 0.8rem; color: var(--muted);">Äiá»u Khiá»ƒn Xe CÃ¢n Báº±ng Trá»±c Tiáº¿p & GiÃ¡m SÃ¡t SÃ³ng NRF24</div>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <span id="badgeState" class="badge badge-boot">BOOT</span>
+        <span id="badgeBat" style="font-size: 0.85rem; color: var(--green); font-weight: 700;">14.8V (4S)</span>
+      </div>
+    </header>
+
+    <!-- Thanh Cháº©n ÄoÃ¡n Tráº¡ng ThÃ¡i Nhanh -->
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; align-items: center;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">STM32 UART:</span>
+        <span id="badgeStmLink" class="badge" style="background:var(--red);">Máº¤T TÃN HIá»†U</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">MPU6050:</span>
+        <span id="badgeMpu" class="badge" style="background:var(--muted);">CHá»œ TÃN HIá»†U</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">SÃ“NG NRF24:</span>
+        <span id="badgeNrf" class="badge" style="background:var(--muted);">CHá»œ TÃN HIá»†U</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">TÆ¯ THáº¾ XE:</span>
+        <span id="badgeUpright" class="badge" style="background:var(--yellow); color:#000;">NGHIÃŠNG</span>
+      </div>
+    </div>
+
+    <!-- ðŸŽ® Báº¢NG ÄIá»€U KHIá»‚N CHáº Y XE TRá»°C TIáº¾P Báº°NG ESP32 MINI -->
+    <div class="card" style="border-left: 4px solid var(--green);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div class="card-title" style="color:var(--green); font-size:0.95rem; font-weight:700; margin:0;">
+          ðŸŽ® ÄIá»€U KHIá»‚N CHáº Y XE TRá»°C TIáº¾P Báº°NG ESP32 MINI (TOUCH PAD / PHÃM PC)
+        </div>
+        <span id="driveStatusText" style="font-size:0.85rem; color:var(--accent); font-weight:700;">Sáºµn sÃ ng lÃ¡i</span>
+      </div>
+      <div style="font-size:0.8rem; color:var(--muted); margin: 6px 0 10px 0;">
+        Cháº¡m giá»¯ nÃºt Ä‘á»ƒ xe cháº¡y theo 8 hÆ°á»›ng mong muá»‘n, tháº£ tay ra xe sáº½ <b>Tá»° Äá»˜NG Dá»ªNG (STOP)</b> an toÃ n. Há»— trá»£ cáº£ phÃ­m W/A/S/D, MÅ©i tÃªn vÃ  Space trÃªn mÃ¡y tÃ­nh!
+      </div>
+
+      <!-- NÃºt ARM / DISARM -->
+      <div class="btn-group">
+        <button class="btn-arm" onclick="sendCmd('arm')">âš¡ Báº¬T CÃ‚N Báº°NG (ARM)</button>
+        <button class="btn-disarm" onclick="sendCmd('disarm')">ðŸ›‘ Táº®T Äá»˜NG CÆ  (DISARM / Cáº®T KHáº¨N Cáº¤P)</button>
+      </div>
+
+      <!-- ðŸŽ›ï¸ Báº¢NG ÄIá»€U KHIá»‚N & TINH CHá»ˆNH PID THá»œI GIAN THá»°C -->
+      <div class="card" style="border: 1px solid var(--border); background: #0b1120; margin-top: 12px; border-radius: 10px; padding: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div class="card-title" style="color:var(--accent); font-size:0.95rem; font-weight:700; margin:0;">
+            ðŸŽ›ï¸ Báº¢NG ÄIá»€U KHIá»‚N & TINH CHá»ˆNH PID THá»œI GIAN THá»°C
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="btn-secondary" style="padding:4px 10px; font-size:0.8rem; min-width:auto;" onclick="applyPreset('soft')">ÃŠm Ã¡i</button>
+            <button class="btn-secondary" style="padding:4px 10px; font-size:0.8rem; min-width:auto;" onclick="applyPreset('stiff')">Cá»©ng cÃ¡p</button>
+          </div>
+        </div>
+        <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0 10px 0;">
+          Thay Ä‘á»•i thÃ´ng sá»‘ vÃ  báº¥m <b>"LÆ°u & Cáº­p Nháº­t"</b>, giÃ¡ trá»‹ sáº½ truyá»n tháº³ng vá» STM32 cáº­p nháº­t ngay láº­p tá»©c mÃ  khÃ´ng cáº§n dá»«ng xe hay náº¡p láº¡i code!
+        </div>
+
+        <div class="form-grid">
+          <!-- Kp GÃ³c -->
+          <div class="field">
+            <label>Kp GÃ³c (Äá»™ cá»©ng vá»¯ng thÃ¢n xe) <span id="lblKp" style="color:var(--accent);">30</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKp" min="0" max="60" step="0.5" value="30" oninput="syncVal('Kp', this.value)">
+              <input type="number" id="inpKp" step="0.5" min="0" max="100" value="30">
+            </div>
+          </div>
+
+          <!-- Kd GÃ³c -->
+          <div class="field">
+            <label>Kd GÃ³c (Giáº£m cháº¥n gÃ³c - Triá»‡t tiÃªu rung) <span id="lblKd" style="color:var(--accent);">1.9</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKd" min="0" max="5.0" step="0.05" value="1.9" oninput="syncVal('Kd', this.value)">
+              <input type="number" id="inpKd" step="0.05" min="0" max="10" value="1.9">
+            </div>
+          </div>
+
+          <!-- Ki GÃ³c -->
+          <div class="field">
+            <label>Ki GÃ³c (TÃ­ch phÃ¢n gÃ³c) <span id="lblKi" style="color:var(--accent);">0.000001</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKi" min="0" max="1.0" step="0.000001" value="0.000001" oninput="syncVal('Ki', this.value)">
+              <input type="number" id="inpKi" step="0.000001" min="0" max="10" value="0.000001">
+            </div>
+          </div>
+
+          <!-- Kp Váº­n Tá»‘c -->
+          <div class="field">
+            <label>Kp Váº­n Tá»‘c (Äá»™ nháº¡y vÃ²ng ngoÃ i) <span id="lblKpS" style="color:var(--green);">0.35</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKpS" min="0" max="5.0" step="0.05" value="0.35" oninput="syncVal('KpS', this.value)">
+              <input type="number" id="inpKpS" step="0.05" min="0" max="10" value="0.35">
+            </div>
+          </div>
+
+          <!-- Ki Váº­n Tá»‘c -->
+          <div class="field">
+            <label>Ki Váº­n Tá»‘c (Khá»­ trÃ´i vá»‹ trÃ­) <span id="lblKiS" style="color:var(--green);">0.55</span></label>
+            <div class="field-row">
+              <input type="range" id="rngKiS" min="0" max="5.0" step="0.05" value="0.55" oninput="syncVal('KiS', this.value)">
+              <input type="number" id="inpKiS" step="0.05" min="0" max="10" value="0.55">
+            </div>
+          </div>
+
+          <!-- Kp LÃ¡i -->
+          <div class="field">
+            <label>Kp LÃ¡i (Äá»™ nháº¡y ráº½ khi báº» lÃ¡i) <span id="lblSteer" style="color:var(--purple);">1.2</span></label>
+            <div class="field-row">
+              <input type="range" id="rngSteer" min="0" max="5.0" step="0.1" value="1.2" oninput="syncVal('Steer', this.value)">
+              <input type="number" id="inpSteer" step="0.1" min="0" max="10" value="1.2">
+            </div>
+          </div>
+
+          <!-- Trim GÃ³c Äáº·t -->
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Trim GÃ³c Äáº·t (Äiá»ƒm 0 trá»ng tÃ¢m cÃ¢n báº±ng tá»± nhiÃªn) <span id="lblTrim" style="color:var(--yellow);">-0.45</span></label>
+            <div class="field-row">
+              <input type="range" id="rngTrim" min="-5.0" max="5.0" step="0.05" value="-0.45" oninput="syncVal('Trim', this.value)">
+              <input type="number" id="inpTrim" step="0.05" min="-10" max="10" value="-0.45">
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-group" style="margin-top:12px;">
+          <button class="btn-submit" onclick="submitPid()">ðŸ’¾ LÆ¯U & Cáº¬P NHáº¬T PID SANG STM32</button>
+          <button class="btn-secondary" onclick="loadFromVehicle()">ðŸ”„ Náº P Láº I PID Tá»ª XE</button>
+        </div>
+      </div>
+
+      <!-- BÃ n D-Pad Ä‘iá»u khiá»ƒn 8 hÆ°á»›ng -->
+      <div class="dpad-container">
+        <!-- Bá»™ chá»n tá»‘c Ä‘á»™ -->
+        <div class="speed-selector">
+          <span style="font-size:0.8rem; color:var(--muted); font-weight:600;">Tá»‘c Ä‘á»™:</span>
+          <button class="speed-btn" onclick="setDriveSpeed(0.20, this)">20% Cháº­m</button>
+          <button class="speed-btn active" onclick="setDriveSpeed(0.40, this)">40% Vá»«a</button>
+          <button class="speed-btn" onclick="setDriveSpeed(0.70, this)">70% Nhanh</button>
+          <button class="speed-btn" onclick="setDriveSpeed(1.00, this)">100% Max</button>
+        </div>
+
+        <div class="dpad-grid">
+          <!-- HÃ ng 1: Tiáº¿n-TrÃ¡i, Tiáº¿n, Tiáº¿n-Pháº£i -->
+          <button class="dpad-btn" id="btnFwdLeft" onmousedown="startDrive('fwd_left')" onmouseup="stopDrive()" ontouchstart="startDrive('fwd_left', event)" ontouchend="stopDrive(event)">
+            â†–<span class="dpad-sub">ChÃ©o TrÃ¡i</span>
+          </button>
+          <button class="dpad-btn" id="btnFwd" onmousedown="startDrive('fwd')" onmouseup="stopDrive()" ontouchstart="startDrive('fwd', event)" ontouchend="stopDrive(event)">
+            â–²<span class="dpad-sub">TIáº¾N</span>
+          </button>
+          <button class="dpad-btn" id="btnFwdRight" onmousedown="startDrive('fwd_right')" onmouseup="stopDrive()" ontouchstart="startDrive('fwd_right', event)" ontouchend="stopDrive(event)">
+            â†—<span class="dpad-sub">ChÃ©o Pháº£i</span>
+          </button>
+
+          <!-- HÃ ng 2: TrÃ¡i, Dá»«ng, Pháº£i -->
+          <button class="dpad-btn" id="btnLeft" onmousedown="startDrive('left')" onmouseup="stopDrive()" ontouchstart="startDrive('left', event)" ontouchend="stopDrive(event)">
+            â—„<span class="dpad-sub">TRÃI</span>
+          </button>
+          <button class="dpad-btn dpad-btn-stop" id="btnStop" onclick="forceStop()">
+            â¹<span class="dpad-sub">Dá»ªNG</span>
+          </button>
+          <button class="dpad-btn" id="btnRight" onmousedown="startDrive('right')" onmouseup="stopDrive()" ontouchstart="startDrive('right', event)" ontouchend="stopDrive(event)">
+            â–º<span class="dpad-sub">PHáº¢I</span>
+          </button>
+
+          <!-- HÃ ng 3: LÃ¹i-TrÃ¡i, LÃ¹i, LÃ¹i-Pháº£i -->
+          <button class="dpad-btn" id="btnBwdLeft" onmousedown="startDrive('bwd_left')" onmouseup="stopDrive()" ontouchstart="startDrive('bwd_left', event)" ontouchend="stopDrive(event)">
+            â†™<span class="dpad-sub">LÃ¹i TrÃ¡i</span>
+          </button>
+          <button class="dpad-btn" id="btnBwd" onmousedown="startDrive('bwd')" onmouseup="stopDrive()" ontouchstart="startDrive('bwd', event)" ontouchend="stopDrive(event)">
+            â–¼<span class="dpad-sub">LÃ™I</span>
+          </button>
+          <button class="dpad-btn" id="btnBwdRight" onmousedown="startDrive('bwd_right')" onmouseup="stopDrive()" ontouchstart="startDrive('bwd_right', event)" ontouchend="stopDrive(event)">
+            â†˜<span class="dpad-sub">LÃ¹i Pháº£i</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ðŸ“¡ Báº¢NG CHáº¨N ÄOÃN & NHáº¬T KÃ GÃ“I TIN NHáº¬N Tá»ª ESP DEVKIT 1 QUA NRF24 -->
+    <div class="card" style="border-left: 4px solid var(--accent);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div class="card-title" style="color:var(--accent); font-size:0.95rem; font-weight:700; margin:0;">
+          ðŸ“¡ GIÃM SÃT & NHáº¬T KÃ GÃ“I TIN Tá»ª ESP DEVKIT 1 QUA NRF24L01
+        </div>
+        <span id="nrfLinkText" style="font-size:0.85rem; font-weight:700; color:var(--yellow);">CHá»œ TÃN HIá»†U...</span>
+      </div>
+      <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0 10px 0;">
+        Theo dÃµi tráº¡ng thÃ¡i chip SPI2, Ä‘áº¿m sá»‘ gÃ³i tin nháº­n Ä‘Æ°á»£c vÃ  hiá»ƒn thá»‹ tá»«ng gÃ³i dá»¯ liá»‡u joystick phÃ¡t tá»« ESP32 DevKit 1.
+      </div>
+
+      <div class="grid-4">
+        <!-- Ã” 1: Pháº§n cá»©ng SPI -->
+        <div style="background:#0b1120; padding:10px 12px; border-radius:8px; border:1px solid #1e293b;">
+          <div style="font-size:0.75rem; color:var(--muted); font-weight:600;">PHáº¦N Cá»¨NG SPI2</div>
+          <div id="diagNrfHw" style="font-size:1.05rem; font-weight:700; margin-top:4px; color:var(--red);">CHÆ¯A Káº¾T Ná»I</div>
+          <div id="diagNrfRaw" style="font-size:0.75rem; color:var(--muted); margin-top:2px;">MÃ£ STATUS: -- | KÃªnh: 76</div>
+        </div>
+
+        <!-- Ã” 2: Tráº¡ng thÃ¡i SÃ³ng -->
+        <div style="background:#0b1120; padding:10px 12px; border-radius:8px; border:1px solid #1e293b;">
+          <div style="font-size:0.75rem; color:var(--muted); font-weight:600;">Káº¾T Ná»I TAY Cáº¦M</div>
+          <div id="diagNrfLink" style="font-size:1.05rem; font-weight:700; margin-top:4px; color:var(--yellow);">CHá»œ PHÃT SÃ“NG</div>
+          <div id="diagNrfAge" style="font-size:0.75rem; color:var(--muted); margin-top:2px;">GÃ³i cuá»‘i: -- ms trÆ°á»›c</div>
+        </div>
+
+        <!-- Ã” 3: Tá»•ng sá»‘ gÃ³i nháº­n -->
+        <div style="background:#0b1120; padding:10px 12px; border-radius:8px; border:1px solid #1e293b;">
+          <div style="font-size:0.75rem; color:var(--muted); font-weight:600;">GÃ“I TIN ÄÃƒ NHáº¬N</div>
+          <div id="diagNrfPkts" style="font-size:1.35rem; font-weight:700; margin-top:2px; color:var(--green);">0</div>
+          <div id="diagNrfSeq" style="font-size:0.75rem; color:var(--muted);">GÃ³i sá»‘: #0</div>
+        </div>
+
+        <!-- Ã” 4: Lá»‡nh hiá»‡n táº¡i tá»« NRF -->
+        <div style="background:#0b1120; padding:10px 12px; border-radius:8px; border:1px solid #1e293b;">
+          <div style="font-size:0.75rem; color:var(--muted); font-weight:600;">Lá»†NH Tá»ª TAY Cáº¦M</div>
+          <div id="diagNrfCmdText" style="font-size:0.95rem; font-weight:700; margin-top:4px; color:var(--text);">Äá»¨NG YÃŠN (STOP)</div>
+          <div id="diagNrfCmdVal" style="font-size:0.75rem; color:var(--muted); margin-top:2px;">Drive: 0 | Steer: 0</div>
+        </div>
+      </div>
+
+      <!-- Cá»­a sá»• Nháº­t KÃ½ GÃ³i Tin Thá»i Gian Thá»±c tá»« ESP32 DevKit 1 -->
+      <div style="margin-top:12px; background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px 12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:6px;">
+          <span style="font-size:0.8rem; font-weight:700; color:#38bdf8; display:flex; align-items:center; gap:6px;">
+            ðŸ“œ NHáº¬T KÃ GÃ“I TIN NHáº¬N Tá»ª ESP DEVKIT 1 (NRF24) THá»œI GIAN THá»°C
+          </span>
+          <div style="display:flex; gap:6px;">
+            <button style="padding:4px 8px; font-size:0.7rem; background:#1e293b; color:#94a3b8; border-radius:4px; min-width:auto;" onclick="toggleNrfAutoScroll()">Cuá»™n: <span id="txtAutoScroll">Báº¬T</span></button>
+            <button style="padding:4px 8px; font-size:0.7rem; background:#1e293b; color:#ef4444; border-radius:4px; min-width:auto;" onclick="clearNrfLog()">XÃ³a Log</button>
+          </div>
+        </div>
+        <div id="nrfLogConsole" class="log-box">
+          <div style="color:#64748b;">[Äang chá» luá»“ng gÃ³i tin NRF tá»« ESP32 DevKit 1...]</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HÃ ng tháº» thÃ´ng sá»‘ Ä‘o gÃ³c & tá»‘c Ä‘á»™ thá»i gian thá»±c -->
+    <div class="grid-4">
+      <div class="card">
+        <div class="card-title">GÃ³c NghiÃªng Pitch</div>
+        <div class="val-large" id="valPitch" style="color:var(--accent);">0.00<span class="val-unit">Â°</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Äiá»ƒm Ä‘áº·t má»¥c tiÃªu: <span id="valTarget">0.00</span>Â°</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Tá»‘c Äá»™ GÃ³c Gyro</div>
+        <div class="val-large" id="valRate" style="color:var(--yellow);">0.0<span class="val-unit">Â°/s</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">Trá»¥c cÃ¢n báº±ng X (Lá»c bÃ¹ 42Hz)</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Tá»‘c Äá»™ BÃ¡nh Xe (RPM)</div>
+        <div class="val-large"><span id="valRpmL">0</span> / <span id="valRpmR">0</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">TrÃ¡i / Pháº£i (TMC2208 vi bÆ°á»›c 1/16)</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Cáº£m Biáº¿n Váº­t Cáº£n</div>
+        <div class="val-large" id="valDistFront">--<span class="val-unit">cm</span></div>
+        <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">ToF VL53L0X: <span id="valTof">--</span> mm</div>
+      </div>
+    </div>
+
+    <!-- Äá»“ thá»‹ trá»±c quan thá»i gian thá»±c (Pitch & Má»¥c tiÃªu) -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="card-title">SÃ³ng GÃ³c NghiÃªng Thá»i Gian Thá»±c (Pitch & Má»¥c TiÃªu)</div>
+        <div style="font-size: 0.75rem; color: var(--accent);">Táº§n sá»‘ 20 Hz (50ms) | Xanh lÃ¡: Pitch, Xanh lam: Target</div>
+      </div>
+      <div class="chart-container">
+        <canvas id="chartCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">ThÃ´ng bÃ¡o</div>
+
+  <script>
+    const stateNames = ["BOOT", "CALIBRATING", "DISARMED", "ARMED (BALANCING)", "FAULT"];
+    const stateBadges = ["badge-boot", "badge-calib", "badge-disarmed", "badge-armed", "badge-fault"];
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2200);
+    }
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ÄIá»€U KHIá»‚N CHáº Y XE QUA ESP32 MINI
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let currentSpeedScale = 0.40;
+    let driveIntervalTimer = null;
+    let currentDir = null;
+    let currentVehicleState = 0;
+
+    function setDriveSpeed(spd, btn) {
+      currentSpeedScale = spd;
+      document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      showToast(`ÄÃ£ chá»n tá»‘c Ä‘á»™: ${Math.round(spd * 100)}%`);
+    }
+
+    function getDriveVector(dir) {
+      const spd = currentSpeedScale;
+      switch (dir) {
+        case 'fwd':       return { speed: spd, steer: 0.0, name: 'â–² TIáº¾N THáº²NG' };
+        case 'bwd':       return { speed: -spd, steer: 0.0, name: 'â–¼ LÃ™I THáº²NG' };
+        case 'left':      return { speed: 0.0, steer: -spd * 1.2, name: 'â—„ QUAY TRÃI' };
+        case 'right':     return { speed: 0.0, steer: spd * 1.2, name: 'â–º QUAY PHáº¢I' };
+        case 'fwd_left':  return { speed: spd * 0.8, steer: -spd * 0.7, name: 'â†– TIáº¾N - CHÃ‰O TRÃI' };
+        case 'fwd_right': return { speed: spd * 0.8, steer: spd * 0.7, name: 'â†— TIáº¾N - CHÃ‰O PHáº¢I' };
+        case 'bwd_left':  return { speed: -spd * 0.8, steer: -spd * 0.7, name: 'â†™ LÃ™I - CHÃ‰O TRÃI' };
+        case 'bwd_right': return { speed: -spd * 0.8, steer: spd * 0.7, name: 'â†˜ LÃ™I - CHÃ‰O PHáº¢I' };
+        default:          return { speed: 0.0, steer: 0.0, name: 'Dá»ªNG (STOP)' };
+      }
+    }
+
+    function sendDrivePacket(speed, steer) {
+      fetch(`/api/drive?speed=${speed.toFixed(2)}&steer=${steer.toFixed(2)}`, { method: 'POST' })
+        .catch(() => {});
+    }
+
+    function startDrive(dir, e) {
+      if (e) { e.preventDefault(); }
+      if (currentVehicleState !== 3) {
+        showToast("âš ï¸ Xe chÆ°a ARM! Báº¥m 'âš¡ Báº¬T CÃ‚N Báº°NG (ARM)' trÆ°á»›c khi lÃ¡i!");
+      }
+      currentDir = dir;
+      const v = getDriveVector(dir);
+      document.getElementById('driveStatusText').innerText = 'Äang cháº¡y: ' + v.name;
+      document.getElementById('driveStatusText').style.color = 'var(--accent)';
+
+      highlightButton(dir, true);
+      sendDrivePacket(v.speed, v.steer);
+
+      if (driveIntervalTimer) clearInterval(driveIntervalTimer);
+      driveIntervalTimer = setInterval(() => {
+        if (currentDir) {
+          const curV = getDriveVector(currentDir);
+          sendDrivePacket(curV.speed, curV.steer);
+        }
+      }, 100);
+    }
+
+    function stopDrive(e) {
+      if (e) { e.preventDefault(); }
+      if (driveIntervalTimer) {
+        clearInterval(driveIntervalTimer);
+        driveIntervalTimer = null;
+      }
+      if (currentDir) {
+        highlightButton(currentDir, false);
+      }
+      currentDir = null;
+      document.getElementById('driveStatusText').innerText = 'Xe Ä‘Ã£ Dá»ªNG (STOP)';
+      document.getElementById('driveStatusText').style.color = 'var(--muted)';
+      sendDrivePacket(0.0, 0.0);
+    }
+
+    function forceStop() {
+      stopDrive();
+      sendCmd('stop');
+      showToast("ðŸ›‘ Lá»‡nh Dá»ªNG KHáº¨N Cáº¤P!");
+    }
+
+    function highlightButton(dir, active) {
+      const idMap = {
+        'fwd': 'btnFwd', 'bwd': 'btnBwd', 'left': 'btnLeft', 'right': 'btnRight',
+        'fwd_left': 'btnFwdLeft', 'fwd_right': 'btnFwdRight', 'bwd_left': 'btnBwdLeft', 'bwd_right': 'btnBwdRight'
+      };
+      const btn = document.getElementById(idMap[dir]);
+      if (btn) {
+        if (active) btn.classList.add('active');
+        else btn.classList.remove('active');
+      }
+    }
+
+    // Äiá»u khiá»ƒn báº±ng BÃ n phÃ­m mÃ¡y tÃ­nh (W, A, S, D, MÅ©i tÃªn, Space)
+    window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.repeat) return;
+      const key = e.key.toLowerCase();
+      if (key === 'w' || key === 'arrowup') startDrive('fwd');
+      else if (key === 's' || key === 'arrowdown') startDrive('bwd');
+      else if (key === 'a' || key === 'arrowleft') startDrive('left');
+      else if (key === 'd' || key === 'arrowright') startDrive('right');
+      else if (key === ' ' || key === 'escape') forceStop();
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      const key = e.key.toLowerCase();
+      if (['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        stopDrive();
+      }
+    });
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Xá»¬ LÃ ÄIá»€U CHá»ˆNH & TINH CHá»ˆNH THÃ”NG Sá» PID
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let latestTelemetry = null;
+
+    function syncVal(name, val) {
+      const r = document.getElementById('rng' + name);
+      if (r) r.value = val;
+      const inp = document.getElementById('inp' + name);
+      if (inp) inp.value = val;
+      const lbl = document.getElementById('lbl' + name);
+      if (lbl) lbl.innerText = val;
+    }
+
+    document.querySelectorAll('input[type=number]').forEach(inp => {
+      inp.addEventListener('input', e => {
+        const id = e.target.id.replace('inp', '');
+        const r = document.getElementById('rng' + id);
+        if (r) r.value = e.target.value;
+        const l = document.getElementById('lbl' + id);
+        if (l) l.innerText = e.target.value;
+      });
+    });
+
+    function applyPreset(type) {
+      if (type === 'soft') {
+        syncVal('Kp', 18.0);
+        syncVal('Kd', 1.36);
+        syncVal('Ki', 0.0);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.02);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', 0.45);
+        showToast("ÄÃ£ chá»n preset: ÃŠM ÃI");
+      } else if (type === 'stiff') {
+        syncVal('Kp', 30.0);
+        syncVal('Kd', 1.90);
+        syncVal('Ki', 0.000001);
+        syncVal('KpS', 0.35);
+        syncVal('KiS', 0.55);
+        syncVal('Steer', 1.20);
+        syncVal('Trim', -0.45);
+        showToast("ÄÃ£ chá»n preset: Cá»¨NG CÃP (Máº·c Ä‘á»‹nh chuáº©n)");
+      }
+    }
+
+    function loadFromVehicle() {
+      if (latestTelemetry) {
+        if (typeof latestTelemetry.kp === 'number') syncVal('Kp', latestTelemetry.kp);
+        if (typeof latestTelemetry.kd === 'number') syncVal('Kd', latestTelemetry.kd);
+        if (typeof latestTelemetry.ki === 'number') syncVal('Ki', latestTelemetry.ki);
+        if (typeof latestTelemetry.kp_s === 'number') syncVal('KpS', latestTelemetry.kp_s);
+        if (typeof latestTelemetry.ki_s === 'number') syncVal('KiS', latestTelemetry.ki_s);
+        if (typeof latestTelemetry.steer === 'number') syncVal('Steer', latestTelemetry.steer);
+        if (typeof latestTelemetry.trim === 'number') syncVal('Trim', latestTelemetry.trim);
+        showToast("ÄÃ£ náº¡p thÃ´ng sá»‘ hiá»‡n táº¡i tá»« xe vÃ o báº£ng chá»‰nh!");
+      }
+    }
+
+    function submitPid() {
+      const kp = document.getElementById('inpKp').value;
+      const kd = document.getElementById('inpKd').value;
+      const ki = document.getElementById('inpKi').value;
+      const kp_s = document.getElementById('inpKpS').value;
+      const ki_s = document.getElementById('inpKiS').value;
+      const steer = document.getElementById('inpSteer').value;
+      const trim = document.getElementById('inpTrim').value;
+
+      fetch(`/api/set_pid?kp=${kp}&kd=${kd}&ki=${ki}&kp_s=${kp_s}&ki_s=${ki_s}&steer=${steer}&trim=${trim}`, { method: 'POST' })
+        .then(r => r.text())
+        .then(res => { showToast("ÄÃ£ gá»­i toÃ n bá»™ thÃ´ng sá»‘ PID sang STM32!"); })
+        .catch(err => { showToast("Lá»—i gá»­i PID: " + err); });
+    }
+
+    function sendCmd(act) {
+      fetch(`/api/cmd?action=${act}`, { method: 'POST' })
+        .then(r => r.text())
+        .then(res => { showToast("ÄÃ£ gá»­i lá»‡nh: " + act.toUpperCase()); })
+        .catch(err => { showToast("Lá»—i gá»­i lá»‡nh: " + err); });
+    }
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // NHáº¬T KÃ GÃ“I TIN NRF24 THá»œI GIAN THá»°C
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let lastLoggedSeq = -1;
+    let nrfAutoScroll = true;
+    const maxLogEntries = 80;
+
+    function clearNrfLog() {
+      document.getElementById('nrfLogConsole').innerHTML = '<div style="color:#64748b;">[ÄÃ£ xÃ³a nháº­t kÃ½...]</div>';
+    }
+
+    function toggleNrfAutoScroll() {
+      nrfAutoScroll = !nrfAutoScroll;
+      document.getElementById('txtAutoScroll').innerText = nrfAutoScroll ? "Báº¬T" : "Táº®T";
+    }
+
+    function appendNrfLog(seq, cmdText, drv, str, st, age) {
+      const consoleEl = document.getElementById('nrfLogConsole');
+      const now = new Date();
+      const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      const row = document.createElement('div');
+      row.innerHTML = `<span style="color:#64748b;">[${timeStr}]</span> <span style="color:#22c55e; font-weight:700;">PKT #${seq}</span> | <span style="color:#38bdf8;">${cmdText}</span> (Drv: ${drv}, Str: ${str}) | <span style="color:#94a3b8;">ST: 0x${st.toString(16).toUpperCase().padStart(2,'0')}</span> | <span style="color:#eab308;">${age}ms</span>`;
+      consoleEl.appendChild(row);
+
+      while (consoleEl.children.length > maxLogEntries) {
+        consoleEl.removeChild(consoleEl.firstChild);
+      }
+      if (nrfAutoScroll) {
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      }
+    }
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Äá»’ THá»Š CANVAS THá»œI GIAN THá»°C
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const canvas = document.getElementById('chartCanvas');
+    const ctx = canvas.getContext('2d');
+    const maxPoints = 120;
+    const historyPitch = new Array(maxPoints).fill(0);
+    const historyTarget = new Array(maxPoints).fill(0);
+
+    function drawChart() {
+      const container = canvas.parentElement;
+      const targetW = (container && container.clientWidth > 50) ? container.clientWidth : 600;
+      const targetH = (container && container.clientHeight > 50) ? container.clientHeight : 180;
+
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const w = canvas.width;
+      const h = canvas.height;
+      const midY = h / 2;
+
+      // LÆ°á»›i tá»a Ä‘á»™
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let y = 0; y < h; y += 30) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+      }
+      ctx.stroke();
+
+      // ÄÆ°á»ng 0 Ä‘á»™ á»Ÿ giá»¯a
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, midY);
+      ctx.lineTo(w, midY);
+      ctx.stroke();
+
+      const scale = h / 40.0; // thang +-20 Ä‘á»™
+
+      // Váº½ Target Pitch (mÃ u xanh dÆ°Æ¡ng)
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < maxPoints; i++) {
+        const x = (i / (maxPoints - 1)) * w;
+        const y = midY - (historyTarget[i] * scale);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Váº½ Pitch thá»±c táº¿ (mÃ u xanh lÃ¡)
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < maxPoints; i++) {
+        const x = (i / (maxPoints - 1)) * w;
+        const y = midY - (historyPitch[i] * scale);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // Polling Telemetry data má»—i 80 ms
+    setInterval(() => {
+      fetch('/api/data')
+        .then(r => r.json())
+        .then(d => {
+          if (!d) return;
+          latestTelemetry = d;
+
+          const pitch = (typeof d.pitch === 'number' && Number.isFinite(d.pitch)) ? d.pitch : 0.0;
+          const target = (typeof d.target === 'number' && Number.isFinite(d.target)) ? d.target : 0.0;
+          const rate = (typeof d.rate === 'number' && Number.isFinite(d.rate)) ? d.rate : 0.0;
+          const rpmL = (typeof d.rpm_l === 'number') ? d.rpm_l : 0.0;
+          const rpmR = (typeof d.rpm_r === 'number') ? d.rpm_r : 0.0;
+          const distF = (typeof d.dist_f === 'number') ? d.dist_f : 999;
+          const tof = (typeof d.tof_mm === 'number') ? d.tof_mm : 8190;
+
+          // Cáº­p nháº­t tháº» Ä‘o gÃ³c
+          const elPitch = document.getElementById('valPitch');
+          elPitch.innerHTML = pitch.toFixed(2) + '<span class="val-unit">Â°</span>';
+          if (Math.abs(pitch) < 3.0) elPitch.style.color = 'var(--green)';
+          else if (Math.abs(pitch) < 15.0) elPitch.style.color = 'var(--yellow)';
+          else elPitch.style.color = 'var(--red)';
+
+          document.getElementById('valTarget').innerText = target.toFixed(2);
+          document.getElementById('valRate').innerHTML = rate.toFixed(1) + '<span class="val-unit">Â°/s</span>';
+          document.getElementById('valRpmL').innerText = Math.round(rpmL);
+          document.getElementById('valRpmR').innerText = Math.round(rpmR);
+          document.getElementById('valDistFront').innerHTML = (distF < 400 ? distF : '--') + '<span class="val-unit">cm</span>';
+          document.getElementById('valTof').innerText = (tof < 8000 ? tof : '--');
+
+          const b = document.getElementById('badgeState');
+          const st = d.state || 0;
+          currentVehicleState = st;
+          b.innerText = stateNames[st] || "UNKNOWN";
+          b.className = "badge " + (stateBadges[st] || "badge-boot");
+
+          // Tráº¡ng thÃ¡i UART STM32
+          const bLink = document.getElementById('badgeStmLink');
+          if (d.stm_link) {
+            bLink.innerText = "ÄÃƒ Káº¾T Ná»I (UART OK)";
+            bLink.style.background = "var(--green)";
+            bLink.style.color = "#fff";
+          } else {
+            bLink.innerText = "Máº¤T TÃN HIá»†U STM32";
+            bLink.style.background = "var(--red)";
+            bLink.style.color = "#fff";
+          }
+
+          // Tráº¡ng thÃ¡i MPU6050
+          const bMpu = document.getElementById('badgeMpu');
+          if (d.stm_link && d.mpu_ok) {
+            bMpu.innerText = "BÃŒNH THÆ¯á»œNG (0 Lá»–I)";
+            bMpu.style.background = "var(--green)";
+            bMpu.style.color = "#fff";
+          } else if (d.stm_link) {
+            bMpu.innerText = `Lá»–I I2C (${d.imu_err})`;
+            bMpu.style.background = "var(--red)";
+            bMpu.style.color = "#fff";
+          } else {
+            bMpu.innerText = "--";
+            bMpu.style.background = "var(--muted)";
+          }
+
+          // Tráº¡ng thÃ¡i SÃ³ng NRF24 nhanh
+          const bNrf = document.getElementById('badgeNrf');
+          if (d.stm_link && d.nrf_link) {
+            bNrf.innerText = "TAY Cáº¦M ÄÃƒ Ná»I ðŸŸ¢";
+            bNrf.style.background = "var(--green)";
+            bNrf.style.color = "#fff";
+          } else if (d.stm_link && d.nrf_hw) {
+            bNrf.innerText = "CHá»œ TAY Cáº¦M (NRF OK) ðŸŸ¡";
+            bNrf.style.background = "var(--yellow)";
+            bNrf.style.color = "#000";
+          } else if (d.stm_link) {
+            bNrf.innerText = "Lá»–I NRF XE (SPI2)";
+            bNrf.style.background = "var(--red)";
+            bNrf.style.color = "#fff";
+          } else {
+            bNrf.innerText = "--";
+            bNrf.style.background = "var(--muted)";
+          }
+
+          const bUpr = document.getElementById('badgeUpright');
+          if (d.upright) {
+            bUpr.innerText = "Sáº´N SÃ€NG ARM (Â±8.0Â°)";
+            bUpr.style.background = "var(--green)";
+            bUpr.style.color = "#fff";
+          } else {
+            bUpr.innerText = "ÄANG NGHIÃŠNG";
+            bUpr.style.background = "var(--yellow)";
+            bUpr.style.color = "#000";
+          }
+
+          // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+          // Cáº¬P NHáº¬T Báº¢NG GIÃM SÃT NRF24 CHI TIáº¾T
+          // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+          const nrfPkts = (typeof d.nrf_pkts === 'number') ? d.nrf_pkts : 0;
+          const nrfSeq  = (typeof d.nrf_seq === 'number') ? d.nrf_seq : 0;
+          const nrfAge  = (typeof d.nrf_age === 'number') ? d.nrf_age : 999999;
+          const nrfDrv  = (typeof d.nrf_drv === 'number') ? d.nrf_drv : 0;
+          const nrfStr  = (typeof d.nrf_str === 'number') ? d.nrf_str : 0;
+          const nrfSt   = (typeof d.nrf_st === 'number') ? d.nrf_st : 0;
+
+          document.getElementById('diagNrfPkts').innerText = nrfPkts.toLocaleString();
+          document.getElementById('diagNrfSeq').innerText = 'GÃ³i sá»‘: #' + nrfSeq;
+          document.getElementById('diagNrfRaw').innerText = `MÃ£ STATUS: 0x${nrfSt.toString(16).toUpperCase().padStart(2, '0')} | KÃªnh: 76`;
+
+          const elDiagHw = document.getElementById('diagNrfHw');
+          if (d.nrf_hw) {
+            elDiagHw.innerText = "ðŸŸ¢ Sáº´N SÃ€NG (SPI OK)";
+            elDiagHw.style.color = "var(--green)";
+          } else {
+            elDiagHw.innerText = "ðŸ”´ Lá»–I SPI (Máº¥t káº¿t ná»‘i)";
+            elDiagHw.style.color = "var(--red)";
+          }
+
+          const elDiagLink = document.getElementById('diagNrfLink');
+          const elDiagAge  = document.getElementById('diagNrfAge');
+          const elNrfText  = document.getElementById('nrfLinkText');
+
+          if (d.nrf_link) {
+            elDiagLink.innerText = "ðŸŸ¢ ÄÃƒ Káº¾T Ná»I (NHáº¬N Tá»T)";
+            elDiagLink.style.color = "var(--green)";
+            elDiagAge.innerText = `GÃ³i cuá»‘i: ${nrfAge} ms trÆ°á»›c`;
+            elNrfText.innerText = "ðŸŸ¢ TAY Cáº¦M ÄANG Káº¾T Ná»I";
+            elNrfText.style.color = "var(--green)";
+          } else if (d.nrf_hw) {
+            elDiagLink.innerText = "ðŸŸ¡ CHá»œ TAY Cáº¦M PHÃT SÃ“NG";
+            elDiagLink.style.color = "var(--yellow)";
+            elDiagAge.innerText = (nrfAge < 60000) ? `Máº¥t sÃ³ng ${Math.round(nrfAge/1000)}s` : "ChÆ°a nháº­n gÃ³i nÃ o";
+            elNrfText.innerText = "ðŸŸ¡ CHá»œ TAY Cáº¦M PHÃT SÃ“NG";
+            elNrfText.style.color = "var(--yellow)";
+          } else {
+            elDiagLink.innerText = "ðŸ”´ KHÃ”NG CÃ“ SÃ“NG";
+            elDiagLink.style.color = "var(--red)";
+            elDiagAge.innerText = "Kiá»ƒm tra module RF";
+            elNrfText.innerText = "ðŸ”´ Lá»–I NRF XE";
+            elNrfText.style.color = "var(--red)";
+          }
+
+          // Hiá»ƒn thá»‹ trá»±c quan lá»‡nh nháº­n tá»« NRF
+          const elCmdText = document.getElementById('diagNrfCmdText');
+          const elCmdVal  = document.getElementById('diagNrfCmdVal');
+          elCmdVal.innerText = `Drive: ${nrfDrv} | Steer: ${nrfStr}`;
+          let cmdName = "Äá»¨NG YÃŠN (STOP)";
+
+          if (Math.abs(nrfDrv) < 100 && Math.abs(nrfStr) < 100) {
+            cmdName = "Äá»¨NG YÃŠN (STOP)";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--muted)";
+          } else if (nrfDrv > 150 && Math.abs(nrfStr) < 150) {
+            cmdName = "â–² TIáº¾N THáº²NG (+" + nrfDrv + ")";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--accent)";
+          } else if (nrfDrv < -150 && Math.abs(nrfStr) < 150) {
+            cmdName = "â–¼ LÃ™I THáº²NG (" + nrfDrv + ")";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--yellow)";
+          } else if (Math.abs(nrfDrv) < 150 && nrfStr < -150) {
+            cmdName = "â—„ QUAY TRÃI (" + nrfStr + ")";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--purple)";
+          } else if (Math.abs(nrfDrv) < 150 && nrfStr > 150) {
+            cmdName = "â–º QUAY PHáº¢I (+" + nrfStr + ")";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--purple)";
+          } else if (nrfDrv > 100 && nrfStr < -100) {
+            cmdName = "â†– TIáº¾N - CHÃ‰O TRÃI";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--accent)";
+          } else if (nrfDrv > 100 && nrfStr > 100) {
+            cmdName = "â†— TIáº¾N - CHÃ‰O PHáº¢I";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--accent)";
+          } else if (nrfDrv < -100 && nrfStr < -100) {
+            cmdName = "â†™ LÃ™I - CHÃ‰O TRÃI";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--yellow)";
+          } else if (nrfDrv < -100 && nrfStr > 100) {
+            cmdName = "â†˜ LÃ™I - CHÃ‰O PHáº¢I";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--yellow)";
+          } else {
+            cmdName = "DI CHUYá»‚N";
+            elCmdText.innerText = cmdName;
+            elCmdText.style.color = "var(--text)";
+          }
+
+          // Ghi vÃ o Nháº­t kÃ½ Stream Log náº¿u cÃ³ gÃ³i tin má»›i tá»« ESP32 DevKit 1
+          if (nrfSeq !== lastLoggedSeq && nrfPkts > 0) {
+            lastLoggedSeq = nrfSeq;
+            appendNrfLog(nrfSeq, cmdName, nrfDrv, nrfStr, nrfSt, nrfAge);
+          }
+
+          // Cáº­p nháº­t chart
+          historyPitch.shift();
+          historyPitch.push(pitch);
+          historyTarget.shift();
+          historyTarget.push(target);
+          drawChart();
+        })
+        .catch(() => {});
+    }, 80);
+  </script>
+</body>
+</html>
