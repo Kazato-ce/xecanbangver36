@@ -7,6 +7,8 @@
 #define PROTOCOL_MAGIC_BYTE         0xAA
 #define PROTOCOL_VERSION            0x01
 #define PROTOCOL_TELEMETRY_MAGIC    0xBB
+#define PROTOCOL_ADAS_STATE_VALID   0x01
+#define PROTOCOL_ADAS_ENABLED       0x02
 
 #define DIAG_FLAG_MPU_OK            (1 << 0) /* MPU6050 WHO_AM_I OK & Gyro Calibrated */
 #define DIAG_FLAG_NRF_OK            (1 << 1) /* NRF24 on STM32 SPI2 initialized */
@@ -31,7 +33,7 @@ typedef struct {
     int16_t  drive_cmd;     /* Signed forward/backward speed (-1000..1000) */
     int16_t  steer_cmd;     /* Signed steering/yaw (-1000..1000) */
     uint8_t  flags;         /* Bit 0: emergency stop, Bit 1: arm requested */
-    uint8_t  reserved[5];
+    uint8_t  reserved[5];   /* reserved[0]: ADAS state valid/enabled bits */
     uint16_t checksum;      /* Simple 16-bit sum */
 } RadioPacket_t;
 

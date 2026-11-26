@@ -37,6 +37,7 @@ Firmware này dành cho board **ESP32 DevKit V1** đóng vai trò là trạm đi
 ## 3. Cách sử dụng điều khiển xe từ Serial Monitor
 
 Mở **Serial Monitor** trên Arduino IDE ở tốc độ **115200 baud**:
+- Gõ `ADAS:1` để bật tránh vật cản hoặc `ADAS:0` để tắt ADAS (chế độ đua). GCS gửi lại trạng thái này khi kết nối.
 - Gõ `x` hoặc `X` $\rightarrow$ Gửi lệnh **ARM** (bật cân bằng xe khi xe dựng thẳng).
 - Gõ `z` hoặc `Z` $\rightarrow$ Gửi lệnh **DISARM** (tắt động cơ).
 - Gõ `e` hoặc `E` $\rightarrow$ **DỪNG KHẨN CẤP** (Emergency Stop).

@@ -12,88 +12,423 @@
 #include "protocol.h"
 #include <math.h>
 
-#define DEG2RAD                    0.01745329252f
-#define NAV_LANE_LAT_KP            0.008f
-#define NAV_LANE_YAW_KP            0.025f
-#define NAV_STEER_LIMIT            0.35f
-#define NAV_AVOID_YAW_LIMIT_DEG    55.0f
-#define NAV_AVOID_DRIVE            0.25f
-
-typedef enum {
-    NAV_LANE_FOLLOW = 0,
-    NAV_AVOID_OBSTACLE,
-    NAV_RETURN_LANE
-} NavigationState_t;
-
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 
 static TIM_HandleTypeDef s_htim6;
 static TIM_HandleTypeDef s_htim7;
 static SPI_HandleTypeDef s_hspi2;
-static float s_lane_ref_yaw_deg = 0.0f;
-static float s_lane_lat_err_mm = 0.0f;
-static NavigationState_t s_navigation_state = NAV_LANE_FOLLOW;
-static float s_avoid_direction = 1.0f;
+static volatile bool s_tof_available = false;
+static bool s_cliff_retreat_active = false;
+static bool s_cliff_clear_timing = false;
+static volatile bool s_adas_enabled = true;
+static uint32_t s_cliff_clear_since_ms = 0U;
+volatile uint8_t g_avoid_last_abort_reason = 0U;
+
+typedef enum {
+    AVOID_IDLE = 0,
+    AVOID_REFLEX,
+    AVOID_TAIL_CLEAR,
+    AVOID_ALIGN
+} AvoidState_t;
+
+static AvoidState_t s_avoid_state = AVOID_IDLE;
+static int8_t s_avoid_dir = 0;
+static float s_avoid_yaw_deg = 0.0f;
+static float s_avoid_tail_steps = 0.0f;
+static int32_t s_avoid_prev_left_steps = 0;
+static int32_t s_avoid_prev_right_steps = 0;
+static uint32_t s_avoid_tail_clear_since_ms = 0U;
+static uint32_t s_avoid_align_since_ms = 0U;
+static uint32_t s_avoid_phase_since_ms = 0U;
+static uint8_t s_avoid_front_close_hits = 0U;
 
 static float app_clampf(float value, float min_value, float max_value)
 {
     return (value < min_value) ? min_value : ((value > max_value) ? max_value : value);
 }
 
-static float app_wrap_angle_deg(float angle_deg)
+static float app_step_delta(int32_t current, int32_t previous)
 {
-    return atan2f(sinf(angle_deg * DEG2RAD), cosf(angle_deg * DEG2RAD)) / DEG2RAD;
+    int64_t delta = (int64_t)current - (int64_t)previous;
+    if (delta > INT32_MAX) {
+        delta -= 4294967296LL;
+    } else if (delta < INT32_MIN) {
+        delta += 4294967296LL;
+    }
+    return (float)delta;
 }
 
-static float app_lane_steer(float yaw_deg)
+static void app_apply_manual_drive_gain(float *cmd_drive)
 {
-    float yaw_error = app_wrap_angle_deg(s_lane_ref_yaw_deg - yaw_deg);
-    return app_clampf((-s_lane_lat_err_mm * NAV_LANE_LAT_KP)
-                    + (yaw_error * NAV_LANE_YAW_KP),
-                      -NAV_STEER_LIMIT, NAV_STEER_LIMIT);
-}
-
-static void app_update_navigation(float yaw_deg,
-                                  uint16_t dist_front,
-                                  uint16_t dist_left,
-                                  uint16_t dist_right,
-                                  float *cmd_drive,
-                                  float *cmd_steer)
-{
-    if (s_navigation_state == NAV_LANE_FOLLOW) {
-        *cmd_steer = app_lane_steer(yaw_deg);
-        if (dist_front >= 2U && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
-            s_avoid_direction = (dist_left > dist_right) ? 1.0f : -1.0f;
-            s_navigation_state = NAV_AVOID_OBSTACLE;
-        }
+    if (!cmd_drive || fabsf(*cmd_drive) <= 0.02f) {
+        return;
     }
 
-    if (s_navigation_state == NAV_AVOID_OBSTACLE) {
-        uint16_t obstacle_side = (s_avoid_direction > 0.0f) ? dist_right : dist_left;
-        if (dist_front >= OBSTACLE_SLOWDOWN_DIST_CM && obstacle_side >= 35U) {
-            s_navigation_state = NAV_RETURN_LANE;
-        } else if (dist_front >= 2U && dist_front < OBSTACLE_STOP_DIST_CM) {
+    float magnitude = fabsf(*cmd_drive) * MANUAL_DRIVE_GAIN;
+    if (magnitude < MANUAL_DRIVE_MIN_EFFECTIVE) {
+        magnitude = MANUAL_DRIVE_MIN_EFFECTIVE;
+    }
+    magnitude = app_clampf(magnitude, 0.0f, MANUAL_DRIVE_MAX);
+    *cmd_drive = copysignf(magnitude, *cmd_drive);
+}
+
+static bool app_get_clearance_cm(UltrasonicId_t id, uint32_t now_ms, float *clearance_cm)
+{
+    UltrasonicSample_t sample = ultrasonic_get_sample(id);
+    if ((sample.timestamp_ms == 0U) ||
+        ((now_ms - sample.timestamp_ms) > US_SAMPLE_MAX_AGE_MS)) {
+        return false;
+    }
+
+    switch (sample.status) {
+        case US_SAMPLE_VALID:
+            *clearance_cm = (float)sample.distance_cm;
+            return true;
+        case US_SAMPLE_TOO_CLOSE:
+            *clearance_cm = 0.0f;
+            return true;
+        case US_SAMPLE_OUT_OF_RANGE:
+            *clearance_cm = 400.0f;
+            return true;
+        case US_SAMPLE_NO_DATA:
+        case US_SAMPLE_TIMEOUT_OR_TOO_CLOSE:
+        default:
+            return false;
+    }
+}
+
+static void app_reset_avoidance(void)
+{
+    s_avoid_state = AVOID_IDLE;
+    s_avoid_dir = 0;
+    s_avoid_yaw_deg = 0.0f;
+    s_avoid_tail_steps = 0.0f;
+    s_avoid_tail_clear_since_ms = 0U;
+    s_avoid_align_since_ms = 0U;
+    s_avoid_phase_since_ms = 0U;
+    s_avoid_front_close_hits = 0U;
+}
+
+static void app_abort_avoidance(uint8_t reason)
+{
+    g_avoid_last_abort_reason = reason;
+    app_reset_avoidance();
+}
+
+static void app_start_avoidance(int8_t direction,
+                                uint32_t now_ms)
+{
+    g_avoid_last_abort_reason = 0U;
+    s_avoid_dir = direction;
+    s_avoid_yaw_deg = 0.0f;
+    s_avoid_tail_steps = 0.0f;
+    motor_get_steps(&s_avoid_prev_left_steps, &s_avoid_prev_right_steps);
+    s_avoid_tail_clear_since_ms = 0U;
+    s_avoid_align_since_ms = 0U;
+    s_avoid_phase_since_ms = now_ms;
+    s_avoid_front_close_hits = 0U;
+    s_avoid_state = AVOID_REFLEX;
+}
+
+static int8_t app_select_avoidance_direction(bool front_blocked,
+                                             bool left_blocked,
+                                             bool right_blocked,
+                                             bool left_open,
+                                             bool right_open,
+                                             float left_cm,
+                                             float right_cm)
+{
+    if (left_blocked && right_blocked) {
+        return 0;
+    }
+    if (left_blocked) {
+        return right_open ? -1 : 0;
+    }
+    if (right_blocked) {
+        return left_open ? 1 : 0;
+    }
+    if (!front_blocked) {
+        return 0;
+    }
+    if (left_open && right_open) {
+        return (right_cm > left_cm) ? -1 : 1;
+    }
+    if (left_open) {
+        return -1;
+    }
+    if (right_open) {
+        return 1;
+    }
+    return 0;
+}
+
+static bool app_update_avoidance(float *cmd_drive,
+                                 float *cmd_steer,
+                                 bool cliff_detected,
+                                 float raw_drive,
+                                 float raw_steer,
+                                 float pitch_deg,
+                                 uint32_t now_ms)
+{
+    float front_cm = 0.0f;
+    bool front_valid = app_get_clearance_cm(US_FRONT, now_ms, &front_cm);
+    float left_cm = 0.0f;
+    float right_cm = 0.0f;
+    bool left_valid = app_get_clearance_cm(US_LEFT, now_ms, &left_cm);
+    bool right_valid = app_get_clearance_cm(US_RIGHT, now_ms, &right_cm);
+    bool front_blocked = front_valid &&
+                         (front_cm < (float)OBSTACLE_SLOWDOWN_DIST_CM);
+    bool left_blocked = left_valid && (left_cm < AVOID_SIDE_SAFE_CM);
+    bool right_blocked = right_valid && (right_cm < AVOID_SIDE_SAFE_CM);
+    bool left_open = left_valid && (left_cm >= AVOID_SIDE_SAFE_CM);
+    bool right_open = right_valid && (right_cm >= AVOID_SIDE_SAFE_CM);
+    bool obstacle_detected = front_blocked || left_blocked || right_blocked;
+    bool all_sensors_clear = front_valid && left_valid && right_valid &&
+                             (front_cm >= (float)OBSTACLE_SLOWDOWN_DIST_CM) &&
+                             left_open && right_open;
+
+    if (s_avoid_state == AVOID_IDLE) {
+        if (cliff_detected || *cmd_drive <= 0.05f || !obstacle_detected) {
+            return false;
+        }
+
+        int8_t direction = app_select_avoidance_direction(front_blocked,
+                                                          left_blocked,
+                                                          right_blocked,
+                                                          left_open,
+                                                          right_open,
+                                                          left_cm,
+                                                          right_cm);
+        if (direction == 0) {
             *cmd_drive = 0.0f;
-            *cmd_steer = s_avoid_direction * NAV_STEER_LIMIT;
-        } else {
-            float yaw_limit = s_lane_ref_yaw_deg
-                            + (s_avoid_direction * NAV_AVOID_YAW_LIMIT_DEG);
-            float yaw_error = app_wrap_angle_deg(yaw_limit - yaw_deg);
-            *cmd_drive = fminf(*cmd_drive, NAV_AVOID_DRIVE);
-            *cmd_steer = app_clampf(yaw_error * NAV_LANE_YAW_KP,
-                                    -NAV_STEER_LIMIT, NAV_STEER_LIMIT);
+            *cmd_steer = 0.0f;
+            return true;
         }
+
+        app_start_avoidance(direction, now_ms);
+    } else if (cliff_detected || raw_drive < -0.05f ||
+               fabsf(raw_steer) > 0.05f) {
+        if (cliff_detected) {
+            app_abort_avoidance(2U);
+        } else {
+            app_abort_avoidance(1U);
+        }
+        return false;
     }
 
-    if (s_navigation_state == NAV_RETURN_LANE) {
-        float yaw_error = app_wrap_angle_deg(s_lane_ref_yaw_deg - yaw_deg);
-        if (fabsf(s_lane_lat_err_mm) < 25.0f && fabsf(yaw_error) < 3.0f) {
-            s_navigation_state = NAV_LANE_FOLLOW;
-            *cmd_steer = app_lane_steer(yaw_deg);
-        } else {
-            *cmd_drive *= 0.7f;
-            *cmd_steer = app_lane_steer(yaw_deg);
+    if ((now_ms - s_avoid_phase_since_ms) >= AVOID_PHASE_TIMEOUT_MS) {
+        app_abort_avoidance(4U);
+        *cmd_drive = 0.0f;
+        *cmd_steer = 0.0f;
+        return true;
+    }
+
+    s_avoid_yaw_deg -= imu_get_gyro_z_dps() * CONTROL_DT_S;
+
+    int32_t current_left_steps = 0;
+    int32_t current_right_steps = 0;
+    motor_get_steps(&current_left_steps, &current_right_steps);
+    float ds_left = app_step_delta(current_left_steps, s_avoid_prev_left_steps);
+    float ds_right = app_step_delta(current_right_steps, s_avoid_prev_right_steps);
+    /* Hai encoder dùng cùng quy ước logical-fwd:
+     * bước tiến của thân xe là trung bình có dấu của hai motor.
+     * Quay ngược chiều hủy nhau thay vì bị cộng trị tuyệt đối thành quãng tiến giả.
+     */
+    float ds_fwd = 0.5f * (ds_left + ds_right);
+    if (ds_fwd < 0.0f) {
+        ds_fwd = 0.0f;
+    }
+    s_avoid_prev_left_steps = current_left_steps;
+    s_avoid_prev_right_steps = current_right_steps;
+    if (s_avoid_state == AVOID_TAIL_CLEAR) {
+        s_avoid_tail_steps += ds_fwd;
+    }
+
+    if (fabsf(pitch_deg) <= 10.0f &&
+        front_valid &&
+        (front_cm <= (float)OBSTACLE_STOP_DIST_CM)) {
+        if (s_avoid_front_close_hits < 3U) {
+            s_avoid_front_close_hits++;
+        }
+        if (s_avoid_front_close_hits >= 3U) {
+            app_abort_avoidance(3U);
+            *cmd_drive = 0.0f;
+            *cmd_steer = 0.0f;
+            return true;
+        }
+    } else {
+        s_avoid_front_close_hits = 0U;
+    }
+
+    switch (s_avoid_state) {
+        case AVOID_REFLEX:
+            if (obstacle_detected) {
+                int8_t direction = app_select_avoidance_direction(front_blocked,
+                                                                  left_blocked,
+                                                                  right_blocked,
+                                                                  left_open,
+                                                                  right_open,
+                                                                  left_cm,
+                                                                  right_cm);
+                if (direction == 0) {
+                    *cmd_drive = 0.0f;
+                    *cmd_steer = 0.0f;
+                    break;
+                }
+                s_avoid_dir = direction;
+            }
+            if (all_sensors_clear) {
+                s_avoid_state = AVOID_TAIL_CLEAR;
+                s_avoid_tail_steps = 0.0f;
+                s_avoid_tail_clear_since_ms = now_ms;
+                motor_get_steps(&s_avoid_prev_left_steps, &s_avoid_prev_right_steps);
+                s_avoid_phase_since_ms = now_ms;
+                *cmd_drive = AVOID_CRUISE_DRIVE;
+                *cmd_steer = 0.0f;
+                break;
+            }
+            *cmd_drive = (obstacle_detected || front_valid || left_valid || right_valid)
+                       ? AVOID_CRUISE_DRIVE
+                       : 0.0f;
+            *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
+            break;
+
+        case AVOID_TAIL_CLEAR:
+            if (obstacle_detected) {
+                int8_t direction = app_select_avoidance_direction(front_blocked,
+                                                                  left_blocked,
+                                                                  right_blocked,
+                                                                  left_open,
+                                                                  right_open,
+                                                                  left_cm,
+                                                                  right_cm);
+                if (direction == 0) {
+                    *cmd_drive = 0.0f;
+                    *cmd_steer = 0.0f;
+                    break;
+                }
+                s_avoid_dir = direction;
+                s_avoid_state = AVOID_REFLEX;
+                s_avoid_phase_since_ms = now_ms;
+                *cmd_drive = AVOID_CRUISE_DRIVE;
+                *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
+                break;
+            }
+
+            *cmd_drive = AVOID_CRUISE_DRIVE;
+            *cmd_steer = 0.0f;
+            if ((s_avoid_tail_steps >= AVOID_TAIL_CLEAR_STEPS) ||
+                ((now_ms - s_avoid_tail_clear_since_ms) >= AVOID_TAIL_CLEAR_MS)) {
+                s_avoid_state = AVOID_ALIGN;
+                s_avoid_align_since_ms = now_ms;
+                s_avoid_phase_since_ms = now_ms;
+            }
+            break;
+
+        case AVOID_ALIGN:
+            if (obstacle_detected) {
+                int8_t direction = app_select_avoidance_direction(front_blocked,
+                                                                  left_blocked,
+                                                                  right_blocked,
+                                                                  left_open,
+                                                                  right_open,
+                                                                  left_cm,
+                                                                  right_cm);
+                if (direction == 0) {
+                    *cmd_drive = 0.0f;
+                    *cmd_steer = 0.0f;
+                    break;
+                }
+                s_avoid_dir = direction;
+                s_avoid_state = AVOID_REFLEX;
+                s_avoid_phase_since_ms = now_ms;
+                *cmd_drive = AVOID_CRUISE_DRIVE;
+                *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
+                break;
+            }
+
+            *cmd_drive = AVOID_CRUISE_DRIVE;
+            *cmd_steer = app_clampf(-s_avoid_yaw_deg * AVOID_YAW_KP,
+                                    -AVOID_SIDE_STEER_MAX,
+                                    AVOID_SIDE_STEER_MAX);
+            if ((now_ms - s_avoid_align_since_ms) >= AVOID_ALIGN_DURATION_MS) {
+                app_reset_avoidance();
+                *cmd_drive = 0.0f;
+                *cmd_steer = 0.0f;
+                return true;
+            }
+            break;
+
+        case AVOID_IDLE:
+        default:
+            return false;
+    }
+
+    return true;
+}
+
+static void app_apply_driver_assist(float *cmd_drive, float *cmd_steer, uint32_t now_ms)
+{
+    if (!cmd_drive || !cmd_steer || *cmd_drive <= 0.05f) {
+        return;
+    }
+
+    float front_cm = 0.0f;
+    if (!app_get_clearance_cm(US_FRONT, now_ms, &front_cm)) {
+        *cmd_drive = 0.0f;
+        return;
+    }
+
+    if (front_cm > (float)OBSTACLE_SLOWDOWN_DIST_CM) {
+        float left_cm = 0.0f;
+        float right_cm = 0.0f;
+        if (!app_get_clearance_cm(US_LEFT, now_ms, &left_cm) ||
+            !app_get_clearance_cm(US_RIGHT, now_ms, &right_cm)) {
+            return;
+        }
+
+        bool left_too_close = left_cm < AVOID_SIDE_SAFE_CM;
+        bool right_too_close = right_cm < AVOID_SIDE_SAFE_CM;
+        if (left_too_close && right_too_close) {
+            *cmd_drive = 0.0f;
+            *cmd_steer = 0.0f;
+        } else if (left_too_close) {
+            *cmd_steer = app_clampf(*cmd_steer - AVOID_SIDE_STEER_MAX, -1.0f, 1.0f);
+        } else if (right_too_close) {
+            *cmd_steer = app_clampf(*cmd_steer + AVOID_SIDE_STEER_MAX, -1.0f, 1.0f);
+        }
+        return;
+    }
+
+    float left_cm = 0.0f;
+    float right_cm = 0.0f;
+    bool left_valid = app_get_clearance_cm(US_LEFT, now_ms, &left_cm);
+    bool right_valid = app_get_clearance_cm(US_RIGHT, now_ms, &right_cm);
+    if (left_valid && right_valid &&
+        left_cm < AVOID_SIDE_SAFE_CM &&
+        right_cm < AVOID_SIDE_SAFE_CM) {
+        *cmd_drive = 0.0f;
+        *cmd_steer = 0.0f;
+        return;
+    }
+
+    if (front_cm <= (float)OBSTACLE_STOP_DIST_CM) {
+        *cmd_drive = 0.0f;
+        *cmd_steer = 0.0f;
+        return;
+    } else {
+        float speed_scale = (front_cm - (float)OBSTACLE_STOP_DIST_CM)
+                          / (float)(OBSTACLE_SLOWDOWN_DIST_CM - OBSTACLE_STOP_DIST_CM);
+        *cmd_drive *= app_clampf(speed_scale, 0.0f, 1.0f);
+    }
+
+    if (left_valid && right_valid) {
+        float max_clearance = (left_cm > right_cm) ? left_cm : right_cm;
+        if (max_clearance > 0.0f) {
+            float steer_bias = ((left_cm - right_cm) / max_clearance)
+                             * DRIVER_ASSIST_STEER_MAX;
+            *cmd_steer = app_clampf(*cmd_steer + steer_bias, -1.0f, 1.0f);
         }
     }
 }
@@ -178,7 +513,7 @@ void app_init(void)
     sm_init();
     balance_init();
     ultrasonic_init();
-    tof_init(&hi2c2);
+    s_tof_available = tof_init(&hi2c2);
     radio_init(&s_hspi2);
 
     /* 5. Khởi tạo MPU6050 & hiệu chuẩn bias khi xe đứng yên */
@@ -186,11 +521,6 @@ void app_init(void)
         /* Lấy 300 mẫu hiệu chuẩn (~600 ms) */
         imu_calibrate(300);
     }
-    s_lane_ref_yaw_deg = imu_get_yaw_deg();
-    s_lane_lat_err_mm = 0.0f;
-    s_navigation_state = NAV_LANE_FOLLOW;
-    s_avoid_direction = 1.0f;
-
     /* 6. Khởi động Timer điều khiển và phát xung */
     app_timers_init();
 }
@@ -203,19 +533,29 @@ void app_loop(void)
     radio_update(now_ms);
     ultrasonic_update(now_ms);
     tof_update(now_ms);
+    s_tof_available = tof_is_available();
     telemetry_uart_update(now_ms);
 }
 
 /* Ngắt chu kỳ cố định 200 Hz từ TIM6 */
 void app_timer_control_tick(void)
 {
+    bool requested_adas_enabled = radio_get_adas_enabled();
+    if (s_adas_enabled && !requested_adas_enabled) {
+        app_reset_avoidance();
+        s_cliff_retreat_active = false;
+        s_cliff_clear_timing = false;
+    }
+    s_adas_enabled = requested_adas_enabled;
+
     /* Đọc IMU với dt cố định 5 ms */
     imu_read(CONTROL_DT_S);
 
     float pitch = imu_get_pitch_deg();
-    tof_evaluate_cliff(pitch);
-    bool cliff_detected = tof_is_cliff_detected();
-    float yaw = imu_get_yaw_deg();
+    if (s_adas_enabled && s_tof_available) {
+        tof_evaluate_cliff(pitch);
+    }
+    bool cliff_detected = s_adas_enabled && tof_is_cliff_detected();
     float gyro_rate = imu_get_gyro_rate_dps();
     uint32_t imu_err = imu_get_error_count();
 
@@ -227,7 +567,7 @@ void app_timer_control_tick(void)
     bool nrf_estop_req = false;
 
     radio_get_commands(&nrf_drive, &nrf_steer, &nrf_arm_req, &nrf_disarm_req, &nrf_estop_req);
-    bool radio_ok = radio_is_connected();
+    bool radio_recent = (radio_get_last_packet_age_ms() <= CONTROL_LINK_TIMEOUT_MS);
 
     /* Nhận lệnh từ ESP32 Super Mini qua UART */
     float uart_drive = 0.0f;
@@ -242,8 +582,8 @@ void app_timer_control_tick(void)
     bool estop_req = nrf_estop_req;
 
     /* Tổng hợp lệnh di chuyển DRIVE & STEER:
-     * - Nếu ESP32 Super Mini (UART) vừa gửi lệnh lái (trong 600ms) -> dùng lệnh UART
-     * - Ngược lại nếu NRF24 đang có sóng kết nối -> dùng lệnh NRF24
+     * - Nếu UART vừa gửi lệnh lái -> dùng lệnh UART
+     * - Ngược lại nếu gói NRF24 còn mới -> dùng lệnh NRF24
      * - Nếu cả hai không điều khiển -> tốc độ = 0 */
     float cmd_drive = 0.0f;
     float cmd_steer = 0.0f;
@@ -251,64 +591,84 @@ void app_timer_control_tick(void)
     if (uart_has_drive) {
         cmd_drive = uart_drive;
         cmd_steer = uart_steer;
-    } else if (radio_ok) {
+    } else if (radio_recent) {
         cmd_drive = nrf_drive;
         cmd_steer = nrf_steer;
     }
+    float raw_drive = cmd_drive;
+    float raw_steer = cmd_steer;
 
-    /* Coi liên kết điều khiển hợp lệ nếu có sóng NRF hoặc đang dùng UART */
-    bool control_link_ok = radio_ok || uart_has_drive || true;
+    bool control_link_ok = radio_recent || uart_has_drive;
 
     /* Cập nhật Máy trạng thái */
     sm_update(pitch, control_link_ok, arm_req, disarm_req, estop_req, imu_err);
 
     bool is_armed = (sm_get_state() == STATE_ARMED);
-    if (!is_armed || fabsf(cmd_steer) >= 0.05f) {
-        s_lane_ref_yaw_deg = yaw;
-        s_lane_lat_err_mm = 0.0f;
-        s_navigation_state = NAV_LANE_FOLLOW;
-    } else {
-        float left_steps_s = stepper_get_speed(MOTOR_LEFT);
-        float right_steps_s = stepper_get_speed(MOTOR_RIGHT);
-        float linear_speed_mm_s = 0.5f * (left_steps_s + right_steps_s)
-                                * (3.14159265359f * WHEEL_DIAMETER_M * 1000.0f)
-                                / (float)MOTOR_STEPS_PER_REV;
-        float yaw_from_lane_rad = app_wrap_angle_deg(yaw - s_lane_ref_yaw_deg) * DEG2RAD;
-        s_lane_lat_err_mm += linear_speed_mm_s * sinf(yaw_from_lane_rad) * CONTROL_DT_S;
-        s_lane_lat_err_mm = app_clampf(s_lane_lat_err_mm, -2000.0f, 2000.0f);
-    }
 
     if (is_armed) {
-        /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection):
-         * CHỈ kích hoạt khi cảm biến ToF thực sự được gắn và đọc hợp lệ */
-        if (cliff_detected && tof_is_valid()) {
-            s_navigation_state = NAV_LANE_FOLLOW;
-            if (cmd_drive >= 0.0f) {
-                cmd_drive = -0.22f; /* Tự động kích hoạt số lùi khẩn cấp */
-            }
+        app_apply_manual_drive_gain(&cmd_drive);
+
+        if (!control_link_ok && s_avoid_state == AVOID_IDLE) {
+            cmd_drive = 0.0f;
+            cmd_steer = 0.0f;
         }
 
-        /* Khi người dùng chủ động điều khiển bằng Web D-Pad (UART) hoặc Joystick NRF:
-         * Ưu tiên 100% lệnh của người dùng, không để bám làn tự hành can thiệp đè lệnh */
-        if (!uart_has_drive && !radio_ok && cmd_drive > 0.05f && fabsf(cmd_steer) < 0.05f && !cliff_detected) {
-            /* Tự động né vật cản & bám làn khi ở chế độ xe tự chạy (không có điều khiển thủ công) */
-            uint16_t dist_front = 999U;
-            uint16_t dist_left = 999U;
-            uint16_t dist_right = 999U;
-            ultrasonic_get_all_dist_cm(&dist_front, &dist_left, &dist_right);
-            app_update_navigation(yaw, dist_front, dist_left, dist_right,
-                                  &cmd_drive, &cmd_steer);
-        } else if (cmd_drive > 0.0f) {
-            /* Giảm tốc an toàn nếu cảm biến phía trước đo được vật cản thực tế gần hơn 25cm */
-            uint16_t dist_front = ultrasonic_get_dist_cm(US_FRONT);
-            if (dist_front >= 5U && dist_front < OBSTACLE_STOP_DIST_CM) {
-                cmd_drive = 0.0f;
-            } else if (dist_front >= 5U && dist_front < OBSTACLE_SLOWDOWN_DIST_CM) {
-                cmd_drive *= 0.5f;
+        if (s_adas_enabled) {
+            /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection). */
+            if (cliff_detected) {
+                s_cliff_retreat_active = true;
+                s_cliff_clear_timing = false;
+                cmd_drive = -0.22f;
+                cmd_steer = 0.0f;
+            } else if (s_cliff_retreat_active) {
+                uint32_t now_ms = HAL_GetTick();
+                if (!s_tof_available || !tof_is_valid()) {
+                    s_cliff_clear_timing = false;
+                    cmd_drive = -0.22f;
+                    cmd_steer = 0.0f;
+                } else {
+                    if (!s_cliff_clear_timing) {
+                        s_cliff_clear_timing = true;
+                        s_cliff_clear_since_ms = now_ms;
+                    }
+
+                    if ((now_ms - s_cliff_clear_since_ms) < CLIFF_EXTRA_BACKUP_MS) {
+                        cmd_drive = -0.22f;
+                        cmd_steer = 0.0f;
+                    } else {
+                        s_cliff_retreat_active = false;
+                        s_cliff_clear_timing = false;
+                        cmd_drive = 0.0f;
+                        cmd_steer = 0.0f;
+                    }
+                }
             }
+
+            bool avoidance_handled = false;
+            if ((s_avoid_state != AVOID_IDLE) || (cmd_drive > 0.05f)) {
+                avoidance_handled = app_update_avoidance(&cmd_drive,
+                                                          &cmd_steer,
+                                                          cliff_detected,
+                                                          raw_drive,
+                                                          raw_steer,
+                                                          pitch,
+                                                          HAL_GetTick());
+            } else {
+                app_reset_avoidance();
+            }
+
+            if (!avoidance_handled && control_link_ok && cmd_drive > 0.05f) {
+                app_apply_driver_assist(&cmd_drive, &cmd_steer, HAL_GetTick());
+            }
+        } else {
+            app_reset_avoidance();
+            s_cliff_retreat_active = false;
+            s_cliff_clear_timing = false;
         }
 
         /* Tính toán cân bằng */
+        cmd_drive = -cmd_drive;
+        cmd_steer = -cmd_steer;
         balance_update(pitch, gyro_rate, cmd_drive, cmd_steer, CONTROL_DT_S);
 
         float left_spd = 0.0f;
@@ -320,6 +680,13 @@ void app_timer_control_tick(void)
         stepper_update_ramp(CONTROL_DT_S);
     } else {
         stepper_stop();
+        s_cliff_retreat_active = false;
+        s_cliff_clear_timing = false;
+        if ((s_avoid_state != AVOID_IDLE) &&
+            (sm_get_state() == STATE_DISARMED)) {
+            g_avoid_last_abort_reason = 5U;
+        }
+        app_reset_avoidance();
     }
 }
 

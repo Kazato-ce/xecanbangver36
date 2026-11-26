@@ -2,109 +2,128 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  MÁY TRẠM ĐIỀU KHIỂN & GIÁM SÁT XE CÂN BẰNG 2 BÁNH STM32F405 (GCS)
-  TÍCH HỢP ESP32-CAM VIDEO STREAM & ĐIỀU KHIỂN CỬ CHỈ BÀN TAY MEDIAPIPE
-================================================================================
-Tác vụ chính:
- 1. Video Stream từ ESP32-CAM / ESP32-S3 CAM qua HTTP MJPEG/RTSP (Góc nhìn thứ nhất FPV).
- 2. Điều khiển xe bằng CỬ CHỈ BÀN TAY (MediaPipe Hands qua Webcam máy tính):
-    - Đưa ngón tay lên/xuống -> Tiến/Lùi.
-    - Nghiêng ngón tay trái/phải -> Bẻ lái Trái/Phải.
-    - Rút tay về hoặc ra ngoài vùng -> Tự động dừng phanh (STOP).
- 3. Kết nối Serial COM siêu tốc (115200 baud) qua ESP32 DevKit V1 NRF24 Dongle.
- 4. Bảng điều khiển 8 HƯỚNG DI CHUYỂN: Tiến, Lùi, Trái, Phải, Tiến-Trái, Tiến-Phải,
-    Lùi-Trái, Lùi-Phải (Phím tắt: W/A/S/D/Q/E/Z/C/Space/X/V).
- 5. Giám sát Telemetry thời gian thực: Góc Pitch, Tốc độ góc Gyro, Pin 4S, Vật cản.
+  MÁY TRẠM ĐIỀU KHIỂN & GIÁM SÁT XE CÂN BẰNG 2 BÁNH STM32F405
+  (Ground Control Station - Dual Camera: ESP32-S3 FPV + Laptop Webcam Gesture)
 ================================================================================
 """
 
 import os
-import sys
 import time
 import re
 import datetime
 import threading
+import traceback
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox
 
 import cv2
-import numpy as np
 from PIL import Image, ImageTk
-
-# Import driver serial, video worker và hand gesture controller
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 try:
-    from serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
+    import pygame
+except ImportError:
+    pygame = None
+
+try:
+    from tools.python_ground_station.serial_driver import (
+        SerialClient, list_com_ports, get_port_details, find_best_esp32_port
+    )
+    from tools.python_ground_station.video_worker import VideoStreamWorker
+    from tools.python_ground_station.hand_controller import HandGestureWorker
+except ImportError:
+    from serial_driver import (
+        SerialClient, list_com_ports, get_port_details, find_best_esp32_port
+    )
     from video_worker import VideoStreamWorker
     from hand_controller import HandGestureWorker
-except ImportError:
-    try:
-        from tools.python_ground_station.serial_driver import SerialClient, list_com_ports, get_port_details, find_best_esp32_port
-        from tools.python_ground_station.video_worker import VideoStreamWorker
-        from tools.python_ground_station.hand_controller import HandGestureWorker
-    except ImportError:
-        SerialClient = None
-        VideoStreamWorker = None
-        HandGestureWorker = None
 
-# ──────────────────────────────────────────────────────────────────────────────
-# BẢNG MÀU GIAO DIỆN HIỆN ĐẠI (DARK THEME)
-# ──────────────────────────────────────────────────────────────────────────────
+
 THEME = {
-    "bg": "#11111b",             # Nền tối sâu
-    "panel": "#181825",          # Khung thẻ panel
-    "card": "#1e1e2e",           # Thẻ nội dung
-    "card_alt": "#252538",       # Thẻ nhấn
-    "border": "#313244",         # Viền
-    "text": "#cdd6f4",           # Chữ chính sáng
-    "subtext": "#a6adc8",        # Chữ phụ
-    "primary": "#89b4fa",        # Xanh dương điểm nhấn
-    "success": "#a6e3a1",        # Xanh lá thành công
-    "warning": "#fab387",        # Cam cảnh báo
-    "danger": "#f38ba8",         # Đỏ nguy hiểm
-    "accent": "#cba6f7",         # Tím
-    "console_bg": "#11111b",     # Nền terminal
+    "bg": "#11111b",
+    "panel": "#181825",
+    "card": "#1e1e2e",
+    "card_alt": "#252538",
+    "border": "#313244",
+    "text": "#cdd6f4",
+    "subtext": "#a6adc8",
+    "primary": "#89b4fa",
+    "success": "#a6e3a1",
+    "warning": "#fab387",
+    "danger": "#f38ba8",
+    "accent": "#cba6f7",
+    "console_bg": "#11111b",
 }
+
+MIN_PULSE_DRIVE_MS = 450
+MIN_PULSE_STEER_MS = 220
+DRIVE_REPEAT_MS = 100
+GAMEPAD_POLL_MS = 16
+GAMEPAD_RECONNECT_MS = 500
+GAMEPAD_DEADZONE = 0.12
 
 
 class GroundStationApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Xe Cân Bằng STM32F405 — Ground Station & MediaPipe Hand Control")
-        self.root.geometry("1340x860")
-        self.root.minsize(1120, 720)
+        self.root.title("Xe Cân Bằng STM32F405 - GCS (ESP32-S3 FPV + Webcam Gesture)")
+        self.root.geometry("1340x830")
+        self.root.minsize(1100, 720)
         self.root.configure(bg=THEME["bg"])
 
-        # Trạng thái Serial COM
+        # Trạng thái Serial
         self.serial_client = None
         self.serial_thread = None
         self.serial_running = False
         self.last_connected_port = None
+        self.adas_enabled = False
+        self.adas_enabled = True
         self.auto_reconnect_var = tk.BooleanVar(value=True)
         self.auto_reconnecting = False
         self._last_reconnect_attempt_ms = 0
+        self._last_drive_tx_ms = 0
+        self._active_drive_inputs = {}
+        self._pressed_keys = set()
+        self._stop_input_active = False
+        self._drive_axis_active = {"drive": False, "steer": False}
+        self._drive_axis_started_at = {"drive": None, "steer": None}
+        self._drive_axis_deadline = {"drive": None, "steer": None}
+        self._drive_axis_hold_value = {"drive": 0, "steer": 0}
+        self._drive_repeat_after_id = None
+        self.gamepad_enabled = False
+        self.gamepad = None
+        self.gamepad_connected = False
+        self.gamepad_buttons = [False, False, False, False]
+        self.gamepad_ignore_button_edges = True
+        self.gamepad_last_scan_ms = 0.0
+        self.gamepad_last_tx_ms = 0.0
+        self.gamepad_last_drive = 0
+        self.gamepad_last_steer = 0
+        self.gamepad_drive_baseline = 0.0
+        self.gamepad_steer_baseline = 0.0
+        self.gamepad_baseline_ready = False
+        self.gamepad_last_drive = None
+        self.gamepad_last_steer = None
+        self._gamepad_poll_after_id = None
+        self._hand_preview_error_reported = False
+        self._control_limits_lock = threading.Lock()
+        self._control_limits = (150, 200)
 
-        # Trạng thái Video Stream FPV ESP32-CAM
+        # Trạng thái Video FPV (ESP32-S3 CAM)
         self.video_worker = None
         self.current_frame = None
         self.photo_img = None
         self.fps_display = 0.0
 
-        # Trạng thái Điều khiển cử chỉ bàn tay (MediaPipe Hand Gesture)
+        # Trạng thái Webcam lái tay (MediaPipe)
         self.hand_worker = None
         self.hand_mode_enabled = False
         self.hand_frame = None
         self.hand_photo_img = None
         self._hand_was_active = False
 
-        # Trạng thái Xử lý Thị giác máy tính (AI Vision Hooks)
-        self.ai_vision_enabled = tk.BooleanVar(value=False)
-        self.ai_mode = tk.StringVar(value="Color / Object Tracking")
-        self.ai_auto_steer_enabled = tk.BooleanVar(value=False)
-
         # Biến trạng thái xe
-        self.robot_state_str = "DISCONNECTED"
+        self.robot_state_str = "CHƯA CÓ TRẠNG THÁI"
         self.pitch_deg = 0.0
-        self.gyro_rate = 0.0
         self.dist_cm = 0
         self.bat_v = 0.0
         self.drive_cmd = 0
@@ -112,54 +131,55 @@ class GroundStationApp:
         self.tx_count = 0
         self.rx_count = 0
 
-        # Biến chẩn đoán phần cứng
+        # Chẩn đoán phần cứng
         self.diag_mpu_ok = False
         self.diag_nrf_ok = False
-        self.nrf_link_ok = False
+        self.diag_spm_ok = False
+        self.diag_upright = False
+        self.diag_imu_err = 0
 
-        # Khởi tạo giao diện
+        self._setup_styles()
         self._build_header()
         self._build_main_layout()
         self._build_status_bar()
+        self._bind_keyboard_controls()
 
-        # Đăng ký phím tắt bàn phím
-        self._bind_keyboard_events()
+        self.refresh_com_ports()
+        self.root.after(100, self._ui_periodic_update)
 
-        # Quét cổng COM ban đầu
-        self.refresh_ports()
-        self.root.after(500, self._auto_connect_dongle)
+    def _setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background=THEME["card"], foreground=THEME["text"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=THEME["bg"])
+        style.configure("Card.TFrame", background=THEME["card"], relief="flat")
+        style.configure(
+            "TCombobox",
+            fieldbackground=THEME["card_alt"],
+            background=THEME["border"],
+            foreground=THEME["text"],
+            arrowcolor=THEME["primary"]
+        )
 
-        # Bắt đầu vòng lặp cập nhật giao diện (33 ms ~ 30 FPS)
-        self.root.after(33, self._ui_periodic_update)
-
-        # Đăng ký đóng cửa sổ an toàn
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # HEADER: TIÊU ĐỀ & ĐỒNG HỒ HỆ THỐNG
-    # ──────────────────────────────────────────────────────────────────────────
     def _build_header(self):
-        header = tk.Frame(self.root, bg=THEME["panel"], height=46, padx=16, pady=6)
+        header = tk.Frame(self.root, bg=THEME["panel"], height=55, padx=20, pady=8)
         header.pack(fill=tk.X, side=tk.TOP)
 
-        title_lbl = tk.Label(
+        tk.Label(
             header,
-            text="⚡ ROBOT TỰ CÂN BẰNG STM32F405 — GROUND STATION & MEDIAPIPE GESTURE CONTROL",
-            font=("Segoe UI", 11, "bold"),
+            text="⚡ STM32F405 SELF-BALANCING ROBOT — FPV & GESTURE GCS",
+            font=("Segoe UI", 13, "bold"),
             fg=THEME["primary"],
             bg=THEME["panel"]
-        )
-        title_lbl.pack(side=tk.LEFT)
+        ).pack(side=tk.LEFT)
 
-        self.lbl_dongle_status = tk.Label(
+        tk.Label(
             header,
-            text="● DONGLE: CHƯA KẾT NỐI",
-            font=("Segoe UI", 9, "bold"),
-            fg=THEME["danger"],
-            bg=THEME["panel"],
-            padx=12
-        )
-        self.lbl_dongle_status.pack(side=tk.LEFT)
+            text="[ESP32-S3 FPV | Webcam MediaPipe | NRF24L01]",
+            font=("Consolas", 10),
+            fg=THEME["subtext"],
+            bg=THEME["panel"]
+        ).pack(side=tk.LEFT, padx=15)
 
         self.lbl_system_clock = tk.Label(
             header,
@@ -170,35 +190,31 @@ class GroundStationApp:
         )
         self.lbl_system_clock.pack(side=tk.RIGHT)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BỐ CỤC CHÍNH (CỘT TRÁI: VIDEO FPV & AI VISION | CỘT PHẢI: LÁI TAY & 8 HƯỚNG)
-    # ──────────────────────────────────────────────────────────────────────────
     def _build_main_layout(self):
-        main_pane = tk.Frame(self.root, bg=THEME["bg"], padx=8, pady=6)
+        main_pane = tk.Frame(self.root, bg=THEME["bg"], padx=10, pady=10)
         main_pane.pack(fill=tk.BOTH, expand=True)
 
-        # Cột trái: Khung Video Stream FPV ESP32-CAM (~54% chiều rộng)
-        left_col = tk.Frame(main_pane, bg=THEME["bg"], padx=4, pady=4)
+        # Cột trái: Khung Video FPV từ ESP32-S3 CAM
+        left_col = tk.Frame(main_pane, bg=THEME["bg"], padx=5, pady=5)
         left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Cột phải: COM Port, Telemetry, Điều khiển 8 hướng & Lái tay MediaPipe (~46% chiều rộng)
-        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=560, padx=4, pady=4)
+        # Cột phải: Kết nối + trạng thái xe + Điều khiển + Console
+        right_col = tk.Frame(main_pane, bg=THEME["bg"], width=550, padx=5, pady=5)
         right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False)
 
         self._build_video_panel(left_col)
         self._build_serial_panel(right_col)
-        self._build_telemetry_panel(right_col)
-        self._build_controls_8way_panel(right_col)
+        self._build_controls_panel(right_col)
         self._build_console_panel(right_col)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 1: KHUNG STREAM VIDEO FPV ESP32-CAM & THỊ GIÁC MÁY TÍNH
+    # PANEL 1: KHUNG FPV VIDEO TỪ ESP32-S3 CAM
     # ──────────────────────────────────────────────────────────────────────────
     def _build_video_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📹 ESP32-S3 CAM Video Stream (FPV Góc Nhìn Thứ Nhất) ",
-            font=("Segoe UI", 10, "bold"),
+            text=" 📹 ESP32-S3 CAM — Góc Nhìn Thứ Nhất (FPV Stream) ",
+            font=("Segoe UI", 11, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
@@ -208,31 +224,29 @@ class GroundStationApp:
         )
         card.pack(fill=tk.BOTH, expand=True)
 
-        # Hàng 1: URL Stream & Nút kết nối
         url_frame = tk.Frame(card, bg=THEME["card"])
-        url_frame.pack(fill=tk.X, pady=(0, 6))
+        url_frame.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(url_frame, text="URL Stream:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(url_frame, text="URL FPV:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
 
         self.cb_stream_url = ttk.Combobox(
             url_frame,
             values=[
-                "http://192.168.4.2/stream",           # ESP32-CAM / ESP32-S3 phát Access Point
+                "http://192.168.4.1:81/stream",
+                "http://172.20.10.8:81/stream",
                 "http://192.168.4.2:81/stream",
-                "http://192.168.1.100:81/stream",       # ESP32-CAM nối WiFi nhà
-                "http://192.168.1.50/stream",
-                "http://192.168.4.2/capture",          # Chế độ chụp ảnh snapshot
-                "0"                                    # Webcam laptop/PC (thử nghiệm)
+                "http://192.168.1.100:81/stream",
+                "http://172.20.10.8/capture",
             ],
-            width=32,
+            width=34,
             font=("Consolas", 9)
         )
-        self.cb_stream_url.set("http://192.168.4.2/stream")
+        self.cb_stream_url.set("http://192.168.4.1:81/stream")
         self.cb_stream_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
 
         self.btn_toggle_stream = tk.Button(
             url_frame,
-            text="▶ MỞ STREAM",
+            text="▶ MỞ FPV",
             font=("Segoe UI", 9, "bold"),
             bg=THEME["primary"],
             fg="#11111b",
@@ -244,7 +258,7 @@ class GroundStationApp:
         )
         self.btn_toggle_stream.pack(side=tk.LEFT, padx=4)
 
-        btn_snap = tk.Button(
+        tk.Button(
             url_frame,
             text="📷 Chụp Ảnh",
             font=("Segoe UI", 9),
@@ -254,56 +268,8 @@ class GroundStationApp:
             padx=8,
             pady=3,
             command=self.save_snapshot
-        )
-        btn_snap.pack(side=tk.LEFT, padx=2)
+        ).pack(side=tk.LEFT, padx=4)
 
-        # Hàng 2: Thanh công cụ Nhận diện AI / Thị giác máy tính
-        ai_frame = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=4, relief=tk.GROOVE, bd=1)
-        ai_frame.pack(fill=tk.X, pady=(0, 6))
-
-        chk_ai = tk.Checkbutton(
-            ai_frame,
-            text="⚡ BẬT NHẬN DIỆN AI",
-            variable=self.ai_vision_enabled,
-            fg=THEME["success"],
-            bg=THEME["card_alt"],
-            selectcolor="#11111b",
-            activebackground=THEME["card_alt"],
-            activeforeground=THEME["success"],
-            font=("Segoe UI", 8, "bold")
-        )
-        chk_ai.pack(side=tk.LEFT, padx=(0, 6))
-
-        tk.Label(ai_frame, text="Chế độ:", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT, padx=(0, 4))
-
-        cb_ai_mode = ttk.Combobox(
-            ai_frame,
-            textvariable=self.ai_mode,
-            values=[
-                "Color / Object Tracking",
-                "Line Following (Bám đường)",
-                "Edge / Canny Detection",
-                "Raw (Không xử lý)"
-            ],
-            width=22,
-            font=("Segoe UI", 8)
-        )
-        cb_ai_mode.pack(side=tk.LEFT, padx=(0, 6))
-
-        chk_auto = tk.Checkbutton(
-            ai_frame,
-            text="Tự động lái theo mục tiêu",
-            variable=self.ai_auto_steer_enabled,
-            fg=THEME["accent"],
-            bg=THEME["card_alt"],
-            selectcolor="#11111b",
-            activebackground=THEME["card_alt"],
-            activeforeground=THEME["accent"],
-            font=("Segoe UI", 8)
-        )
-        chk_auto.pack(side=tk.LEFT)
-
-        # Khung Video Canvas hiển thị khung hình FPV
         self.video_canvas = tk.Canvas(
             card,
             bg="#0b0b12",
@@ -313,15 +279,15 @@ class GroundStationApp:
         self.video_canvas.pack(fill=tk.BOTH, expand=True)
         self.video_canvas.bind("<Configure>", self._on_canvas_resize)
 
-        self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream và bấm 'MỞ STREAM'")
+        self._draw_video_placeholder("Chưa mở FPV từ ESP32-S3 CAM\nNhập IP:81/stream và bấm 'MỞ FPV'")
 
-        info_bar = tk.Frame(card, bg=THEME["card_alt"], height=24, padx=8, pady=2)
-        info_bar.pack(fill=tk.X, pady=(4, 0))
+        info_bar = tk.Frame(card, bg=THEME["card_alt"], height=26, padx=8, pady=3)
+        info_bar.pack(fill=tk.X, pady=(6, 0))
 
         self.lbl_stream_status = tk.Label(
             info_bar,
-            text="● STREAM TẮT",
-            font=("Segoe UI", 8, "bold"),
+            text="● FPV TẮT",
+            font=("Segoe UI", 9, "bold"),
             fg=THEME["subtext"],
             bg=THEME["card_alt"]
         )
@@ -329,8 +295,8 @@ class GroundStationApp:
 
         self.lbl_fps = tk.Label(
             info_bar,
-            text="FPS: 0.0 | Phân giải: --x--",
-            font=("Consolas", 8),
+            text="FPS: 0.0 | Độ phân giải: --x--",
+            font=("Consolas", 9),
             fg=THEME["subtext"],
             bg=THEME["card_alt"]
         )
@@ -342,7 +308,7 @@ class GroundStationApp:
         h = max(self.video_canvas.winfo_height(), 300)
         self.video_canvas.create_text(
             w // 2, h // 2,
-            text=f"📷\n\n{message}",
+            text=f"📹\n\n{message}",
             fill=THEME["subtext"],
             font=("Segoe UI", 11),
             justify=tk.CENTER
@@ -350,7 +316,7 @@ class GroundStationApp:
 
     def _on_canvas_resize(self, event):
         if self.video_worker is None or not self.video_worker.running:
-            self._draw_video_placeholder("Chưa mở stream video ESP32-CAM\nNhập URL stream và bấm 'MỞ STREAM'")
+            self._draw_video_placeholder("Chưa mở FPV từ ESP32-S3 CAM\nNhập IP:81/stream và bấm 'MỞ FPV'")
 
     def toggle_video_stream(self):
         if self.video_worker and self.video_worker.running:
@@ -359,17 +325,13 @@ class GroundStationApp:
             self.start_video_stream()
 
     def start_video_stream(self):
-        if VideoStreamWorker is None:
-            messagebox.showerror("Lỗi", "Không tìm thấy module video_worker.py!")
-            return
-
         url = self.cb_stream_url.get().strip()
         if not url:
-            messagebox.showwarning("Cảnh báo", "Vui lòng nhập đường dẫn URL Stream của ESP32-CAM!")
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập URL Stream của ESP32-S3 CAM!")
             return
 
-        self.btn_toggle_stream.config(text="⏹ DỪNG STREAM", bg=THEME["danger"])
-        self.lbl_stream_status.config(text="● ĐANG KẾT NỐI...", fg=THEME["warning"])
+        self.btn_toggle_stream.config(text="⏹ DỪNG FPV", bg=THEME["danger"])
+        self.lbl_stream_status.config(text="● ĐANG KẾT NỐI FPV...", fg=THEME["warning"])
 
         self.video_worker = VideoStreamWorker(
             source_url=url,
@@ -377,17 +339,16 @@ class GroundStationApp:
             on_status=self._on_video_status
         )
         self.video_worker.start()
-        self._log_console(f"[VISION] Đang kết nối video stream: {url}", "info")
 
     def stop_video_stream(self):
         if self.video_worker:
             self.video_worker.stop()
             self.video_worker = None
-        self.btn_toggle_stream.config(text="▶ MỞ STREAM", bg=THEME["primary"])
-        self.lbl_stream_status.config(text="● STREAM ĐÃ DỪNG", fg=THEME["subtext"])
-        self.lbl_fps.config(text="FPS: 0.0 | Phân giải: --x--")
-        self._draw_video_placeholder("Stream đã dừng.\nBấm 'MỞ STREAM' để kết nối lại.")
-        self._log_console("[VISION] Đã dừng video stream.", "info")
+        self.current_frame = None
+        self.btn_toggle_stream.config(text="▶ MỞ FPV", bg=THEME["primary"])
+        self.lbl_stream_status.config(text="● FPV ĐÃ DỪNG", fg=THEME["subtext"])
+        self.lbl_fps.config(text="FPS: 0.0 | Độ phân giải: --x--")
+        self._draw_video_placeholder("FPV đã dừng.\nBấm 'MỞ FPV' để kết nối lại.")
 
     def _on_video_frame(self, frame_bgr, fps):
         self.current_frame = frame_bgr
@@ -396,94 +357,33 @@ class GroundStationApp:
     def _on_video_status(self, msg, is_ok):
         def _update():
             if is_ok:
-                self.lbl_stream_status.config(text="● LIVE STREAM (ESP32-CAM OK)", fg=THEME["success"])
+                self.lbl_stream_status.config(text="● FPV LIVE", fg=THEME["success"])
             else:
                 self.lbl_stream_status.config(text=f"● {msg}", fg=THEME["danger"] if "Lỗi" in msg else THEME["warning"])
         self.root.after(0, _update)
 
     def save_snapshot(self):
         if self.current_frame is None:
-            messagebox.showinfo("Thông báo", "Chưa có khung hình video nào để lưu!")
+            messagebox.showinfo("Thông báo", "Chưa có khung hình FPV nào để lưu!")
             return
 
         snap_dir = os.path.join(os.path.dirname(__file__), "snapshots")
         os.makedirs(snap_dir, exist_ok=True)
-        fname = datetime.datetime.now().strftime("snapshot_%Y%m%d_%H%M%S.png")
+        fname = datetime.datetime.now().strftime("fpv_%Y%m%d_%H%M%S.png")
         path = os.path.join(snap_dir, fname)
 
         cv2.imwrite(path, self.current_frame)
-        self._log_console(f"[VISION] Đã lưu ảnh snapshot: {fname}", "info")
+        self.log_console(f"[FPV] Đã lưu ảnh chụp: {fname}", "INFO")
         messagebox.showinfo("Thành công", f"Đã lưu ảnh snapshot vào:\n{path}")
 
-    def _process_ai_vision(self, frame):
-        """Pipeline nhận diện thị giác máy tính"""
-        if not self.ai_vision_enabled.get():
-            return frame
-
-        mode = self.ai_mode.get()
-        h, w = frame.shape[:2]
-
-        if mode == "Color / Object Tracking":
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            lower_color = np.array([0, 120, 70])
-            upper_color = np.array([10, 255, 255])
-            mask1 = cv2.inRange(hsv, lower_color, upper_color)
-
-            lower_color2 = np.array([170, 120, 70])
-            upper_color2 = np.array([180, 255, 255])
-            mask2 = cv2.inRange(hsv, lower_color2, upper_color2)
-
-            mask = mask1 | mask2
-            mask = cv2.erode(mask, None, iterations=2)
-            mask = cv2.dilate(mask, None, iterations=2)
-
-            contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                c = max(contours, key=cv2.contourArea)
-                ((cx, cy), radius) = cv2.minEnclosingCircle(c)
-                if radius > 15:
-                    cv2.circle(frame, (int(cx), int(cy)), int(radius), (0, 255, 0), 2)
-                    cv2.circle(frame, (int(cx), int(cy)), 4, (0, 0, 255), -1)
-
-                    center_x = w // 2
-                    err_x = cx - center_x
-                    cv2.line(frame, (center_x, int(cy)), (int(cx), int(cy)), (255, 255, 0), 1)
-
-                    text = f"Target: ({int(cx)}, {int(cy)}) | Err_X: {int(err_x)}"
-                    cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                    if self.ai_auto_steer_enabled.get() and self.serial_running and not self.hand_mode_enabled:
-                        steer_val = int(np.clip(err_x * 1.5, -400, 400))
-                        drive_val = 150 if abs(err_x) < 80 else 0
-                        self.send_serial_command(f"DRIVE {drive_val} {steer_val}")
-
-        elif mode == "Line Following (Bám đường)":
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            _, thresh = cv2.threshold(blur, 60, 255, cv2.THRESH_BINARY_INV)
-            roi = thresh[int(h * 0.6):, :]
-            M = cv2.moments(roi)
-            if M["m00"] > 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"]) + int(h * 0.6)
-                cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
-                cv2.line(frame, (w // 2, cy), (cx, cy), (0, 255, 255), 2)
-
-        elif mode == "Edge / Canny Detection":
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
-            frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-
-        return frame
-
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 2: KẾT NỐI SERIAL COM USB (ESP32 DevKit NRF24 Dongle)
+    # PANEL 2: KẾT NỐI ESP32 DEVKIT V1 (NRF24 BRIDGE)
     # ──────────────────────────────────────────────────────────────────────────
     def _build_serial_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 🔌 Cổng USB Serial COM (ESP32 DevKit NRF24 Dongle) ",
-            font=("Segoe UI", 9, "bold"),
+            text=" 📡 Cổng Kết Nối ESP32 DevKit V1 (NRF24L01 Bridge) ",
+            font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
@@ -491,62 +391,342 @@ class GroundStationApp:
             padx=10,
             pady=6
         )
-        card.pack(fill=tk.X, pady=(0, 6))
+        card.pack(fill=tk.X, pady=(0, 8))
 
-        row1 = tk.Frame(card, bg=THEME["card"])
-        row1.pack(fill=tk.X, pady=2)
+        row = tk.Frame(card, bg=THEME["card"])
+        row.pack(fill=tk.X)
 
-        tk.Label(row1, text="Cổng COM:", fg=THEME["text"], bg=THEME["card"], font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(row, text="COM:", font=("Segoe UI", 9, "bold"), fg=THEME["text"], bg=THEME["card"]).pack(side=tk.LEFT)
 
-        self.cb_ports = ttk.Combobox(row1, width=14, font=("Consolas", 8))
-        self.cb_ports.pack(side=tk.LEFT, padx=(0, 4))
+        self.cb_com_ports = ttk.Combobox(row, width=22, state="readonly")
+        self.cb_com_ports.pack(side=tk.LEFT, padx=6)
 
-        btn_refresh = tk.Button(
-            row1, text="🔄 Quét", font=("Segoe UI", 8),
-            bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT, padx=6, pady=1,
-            command=self.refresh_ports
-        )
-        btn_refresh.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(
+            row, text="🔄 Quét", bg=THEME["card_alt"], fg=THEME["text"],
+            relief=tk.FLAT, padx=6, command=self.refresh_com_ports
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            row, text="⚡ Tự Nối", bg=THEME["primary"], fg="#11111b",
+            font=("Segoe UI", 8, "bold"), relief=tk.FLAT, padx=6, command=self.auto_connect_esp32
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            row, text="📡 Ping", bg=THEME["card_alt"], fg=THEME["text"],
+            relief=tk.FLAT, padx=6, command=self.ping_robot
+        ).pack(side=tk.LEFT, padx=2)
 
         self.btn_connect = tk.Button(
-            row1, text="⚡ KẾT NỐI", font=("Segoe UI", 8, "bold"),
-            bg=THEME["primary"], fg="#11111b", activebackground=THEME["accent"],
-            relief=tk.FLAT, padx=10, pady=2,
-            command=self.toggle_serial_connection
+            row,
+            text="KẾT NỐI",
+            font=("Segoe UI", 9, "bold"),
+            bg=THEME["success"],
+            fg="#11111b",
+            relief=tk.FLAT,
+            padx=12,
+            pady=2,
+            command=self.toggle_serial
         )
-        self.btn_connect.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_connect.pack(side=tk.RIGHT)
 
-        btn_ping = tk.Button(
-            row1, text="PING", font=("Segoe UI", 8),
-            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=6, pady=1,
-            command=lambda: self.send_serial_command("PING")
+        status_row = tk.Frame(card, bg=THEME["card"])
+        status_row.pack(fill=tk.X, pady=(4, 0))
+
+        self.lbl_serial_badge = tk.Label(
+            status_row,
+            text="● Chưa kết nối Serial",
+            font=("Segoe UI", 9),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
         )
-        btn_ping.pack(side=tk.LEFT)
+        self.lbl_serial_badge.pack(side=tk.LEFT)
 
-        row2 = tk.Frame(card, bg=THEME["card"])
-        row2.pack(fill=tk.X, pady=(4, 0))
-
-        chk_reconnect = tk.Checkbutton(
-            row2,
-            text="Tự động phát hiện & kết nối lại khi cắm USB",
+        tk.Checkbutton(
+            status_row,
+            text="Tự nối lại",
             variable=self.auto_reconnect_var,
+            font=("Segoe UI", 8),
             fg=THEME["subtext"],
             bg=THEME["card"],
             selectcolor=THEME["card_alt"],
             activebackground=THEME["card"],
-            activeforeground=THEME["text"],
-            font=("Segoe UI", 8)
+            activeforeground=THEME["text"]
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.lbl_rf_link = tk.Label(
+            status_row,
+            text="● Sóng NRF: Chờ kết nối COM...",
+            font=("Segoe UI", 9, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
         )
-        chk_reconnect.pack(side=tk.LEFT)
+        self.lbl_rf_link.pack(side=tk.RIGHT)
+
+        vehicle_row = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=5)
+        vehicle_row.pack(fill=tk.X, pady=(6, 0))
+
+        tk.Label(
+            vehicle_row,
+            text="TRẠNG THÁI XE",
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card_alt"]
+        ).pack(side=tk.LEFT)
+
+        self.lbl_vehicle_state = tk.Label(
+            vehicle_row,
+            text=self.robot_state_str,
+            font=("Segoe UI", 10, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card_alt"]
+        )
+        self.lbl_vehicle_state.pack(side=tk.RIGHT)
+
+    def ping_robot(self):
+        if not self.serial_running or not self.serial_client:
+            self.log_console("[Ping] Chưa kết nối cổng COM của ESP32!", "WARN")
+            return
+        self.send_serial_cmd("PING")
+        self.log_console("[Ping] Đã gửi lệnh PING kiểm tra sóng sang ESP32 DevKit...", "INFO")
+
+    def refresh_com_ports(self):
+        details = get_port_details()
+        labels = [d["label"] for d in details]
+        self.cb_com_ports["values"] = labels
+
+        best_idx = 0
+        for i, d in enumerate(details):
+            if d.get("is_esp"):
+                best_idx = i
+                break
+
+        if labels:
+            self.cb_com_ports.current(best_idx)
+        self.log_console(f"[Serial] Tìm thấy {len(details)} cổng COM. Tự chọn: {labels[best_idx] if labels else 'Không có'}", "INFO")
+
+    def auto_connect_esp32(self):
+        self.refresh_com_ports()
+        port = find_best_esp32_port()
+        if not port:
+            messagebox.showinfo("Tìm cổng COM", "Chưa tìm thấy cổng COM nào cắm vào máy tính!")
+            return
+        self.log_console(f"[Auto-Connect] Đang tự động kết nối cổng: {port}...", "INFO")
+        self.connect_serial(target_port=port)
+
+
+    def ping_robot(self):
+        if not self.serial_running or not self.serial_client:
+            self.log_console("[Ping] Chưa kết nối cổng COM của ESP32!", "WARN")
+            return
+        self.send_serial_cmd("PING")
+        self.log_console("[Ping] Đã gửi lệnh PING kiểm tra sóng sang ESP32 DevKit...", "INFO")
+
+    def refresh_com_ports(self):
+        details = get_port_details()
+        labels = [d["label"] for d in details]
+        self.cb_com_ports["values"] = labels
+
+        best_idx = 0
+        for i, d in enumerate(details):
+            if d.get("is_esp"):
+                best_idx = i
+                break
+
+        if labels:
+            self.cb_com_ports.current(best_idx)
+        self.log_console(f"[Serial] Tìm thấy {len(details)} cổng COM. Tự chọn: {labels[best_idx] if labels else 'Không có'}", "INFO")
+
+    def auto_connect_esp32(self):
+        self.refresh_com_ports()
+        port = find_best_esp32_port()
+        if not port:
+            messagebox.showinfo("Tìm cổng COM", "Chưa tìm thấy cổng COM nào cắm vào máy tính!")
+            return
+        self.log_console(f"[Auto-Connect] Đang tự động kết nối cổng: {port}...", "INFO")
+        self.connect_serial(target_port=port)
+
+    def toggle_serial(self):
+        if self.serial_running:
+            self.disconnect_serial(is_unexpected=False)
+        else:
+            self.connect_serial()
+
+    def connect_serial(self, target_port=None):
+        if target_port is None:
+            selected = self.cb_com_ports.get().strip()
+            if not selected:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn cổng COM của ESP32 DevKit V1!")
+                return False
+            target_port = selected.split()[0].strip()
+
+        try:
+            self.serial_client = SerialClient(port=target_port, baudrate=115200, timeout=0.1)
+            self.serial_client.open()
+            self.serial_running = True
+            self.last_connected_port = target_port
+
+            self.btn_connect.config(text="NGẮT KẾT NỐI", bg=THEME["danger"], fg="#ffffff")
+            self.lbl_serial_badge.config(text=f"● Đã kết nối: {target_port} @ 115200", fg=THEME["success"])
+            self.log_console(f"[Serial] Đã mở cổng {target_port} thành công!", "SUCCESS")
+
+            self.serial_thread = threading.Thread(target=self._serial_reader_loop, daemon=True)
+            self.serial_thread.start()
+            self._set_adas_state(False)
+            self._send_adas_state(log_state=True)
+            self.cmd_arm()
+            self.robot_state_str = "ARMED"
+            self._update_vehicle_state_widget()
+            self.log_console("[ARM] Đã gửi lệnh ARM mặc định sau khi kết nối.", "SUCCESS")
+            self._send_adas_state(log_state=True)
+
+            self.root.after(300, self.ping_robot)
+            return True
+
+        except Exception as e:
+            self.serial_running = False
+            self.lbl_serial_badge.config(text=f"● Lỗi mở cổng {target_port}", fg=THEME["danger"])
+            self.log_console(f"[Serial Lỗi] {e}", "ERROR")
+            if not getattr(self, 'auto_reconnecting', False):
+                messagebox.showerror("Lỗi kết nối", f"Không thể mở cổng {target_port}:\n{e}")
+            return False
+
+    def disconnect_serial(self, is_unexpected=False):
+        self.serial_running = False
+        if self.serial_client:
+            self.serial_client.close()
+            self.serial_client = None
+
+        self.btn_connect.config(text="KẾT NỐI", bg=THEME["success"], fg="#11111b")
+        if is_unexpected:
+            self.lbl_serial_badge.config(text="● Mất kết nối USB (Đang chờ cắm lại...)", fg=THEME["warning"])
+            self.log_console("[Serial] Cổng USB bị ngắt đột ngột!", "WARN")
+        else:
+            self.lbl_serial_badge.config(text="● Đã ngắt kết nối", fg=THEME["subtext"])
+            self.log_console("[Serial] Đã đóng cổng kết nối.", "WARN")
+
+    def _serial_reader_loop(self):
+        buffer = ""
+        while self.serial_running and self.serial_client and self.serial_client.is_open:
+            try:
+                data = self.serial_client.read(256)
+                if data:
+                    text = data.decode("utf-8", errors="ignore")
+                    buffer += text
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            self.rx_count += 1
+                            self.root.after(0, self._process_rx_line, line)
+                else:
+                    time.sleep(0.005)
+            except Exception:
+                if self.serial_running:
+                    self.root.after(0, lambda: self.disconnect_serial(is_unexpected=True))
+                break
+
+    def _process_rx_line(self, line):
+        self.log_console(f"RX: {line}", "RX")
+
+        if "TX 1-CHIỀU" in line or "1-WAY-TX" in line:
+            self.diag_nrf_ok = True
+            self.lbl_rf_link.config(text="● SÓNG NRF: PHÁT 1-CHIỀU", fg=THEME["success"])
+        elif "KẾT NỐI TỐT" in line or "Sóng NRF OK" in line:
+            self.diag_nrf_ok = True
+            self.lbl_rf_link.config(text="● SÓNG NRF: ĐÃ BẮT SÓNG XE (ACK OK)", fg=THEME["success"])
+        elif "CHỜ TÍN HIỆU XE" in line or "Chưa nhận được ACK" in line:
+            self.diag_nrf_ok = False
+            self.lbl_rf_link.config(text="● SÓNG NRF: ĐANG TÌM XE", fg=THEME["warning"])
+        elif "ACK: ARM" in line:
+            self.robot_state_str = "ARMED"
+            self._update_vehicle_state_widget()
+        elif "ACK: DISARM" in line:
+            self.robot_state_str = "DISARMED"
+            self._update_vehicle_state_widget()
+        elif "ACK: ESTOP" in line:
+            self.robot_state_str = "FAULT"
+            self._update_vehicle_state_widget()
+        elif "ACK: ADAS ON" in line:
+            self._set_adas_state(True)
+        elif "ACK: ADAS OFF" in line:
+            self._set_adas_state(False)
+        elif "PONG:" in line:
+            if "RADIO_OK=1" in line:
+                self.lbl_rf_link.config(text="● NRF24 ESP32: SẴN SÀNG", fg=THEME["primary"])
+            else:
+                self.lbl_rf_link.config(text="● NRF24: LỖI PHẦN CỨNG", fg=THEME["danger"])
+
+        adas_match = re.search(r'"adas"\s*:\s*(true|false)', line, re.IGNORECASE)
+        if adas_match:
+            self._set_adas_state(adas_match.group(1).lower() == "true")
+
+        if "Telemetry" in line or "Pitch=" in line:
+            self.diag_nrf_ok = True
+            m_state = re.search(r"State=(\d+)", line)
+            m_pitch = re.search(r"Pitch=([\+\-\d\.]+)", line)
+            m_dist = re.search(r"Dist=(\d+)", line)
+            m_bat = re.search(r"Bat=([\d\.]+)", line)
+            m_mpu = re.search(r"MPU=(\d+)", line)
+            m_nrf = re.search(r"NRF=(\d+)", line)
+            m_spm = re.search(r"SPM=(\d+)", line)
+            m_upr = re.search(r"Upright=(\d+)", line)
+            m_err = re.search(r"ImuErr=(\d+)", line)
+
+            if m_state:
+                st_val = int(m_state.group(1))
+                state_map = {0: "BOOT", 1: "CALIBRATING", 2: "DISARMED", 3: "ARMED", 4: "FAULT"}
+                self.robot_state_str = state_map.get(st_val, f"STATE_{st_val}")
+
+            if m_pitch:
+                try:
+                    self.pitch_deg = float(m_pitch.group(1))
+                except ValueError:
+                    pass
+
+            if m_dist:
+                try:
+                    self.dist_cm = int(m_dist.group(1))
+                except ValueError:
+                    pass
+
+            if m_bat:
+                try:
+                    self.bat_v = float(m_bat.group(1))
+                except ValueError:
+                    pass
+
+            if m_mpu:
+                self.diag_mpu_ok = (int(m_mpu.group(1)) == 1)
+            if m_nrf:
+                self.diag_nrf_ok = (int(m_nrf.group(1)) == 1)
+            if m_spm:
+                self.diag_spm_ok = (int(m_spm.group(1)) == 1)
+            if m_upr:
+                self.diag_upright = (int(m_upr.group(1)) == 1)
+            if m_err:
+                self.diag_imu_err = int(m_err.group(1))
+
+            self._update_vehicle_state_widget()
+
+    def _update_vehicle_state_widget(self):
+        st_colors = {
+            "ARMED": THEME["success"],
+            "DISARMED": THEME["warning"],
+            "CALIBRATING": THEME["accent"],
+            "BOOT": THEME["primary"],
+            "FAULT": THEME["danger"],
+        }
+        col = st_colors.get(self.robot_state_str, THEME["subtext"])
+        self.lbl_vehicle_state.config(text=self.robot_state_str, fg=col)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 3: GIÁM SÁT TELEMETRY XE CÂN BẰNG
+    # PANEL 4: ĐIỀU KHIỂN XE (NÚT BẤM + WEBCAM LÁI TAY)
     # ──────────────────────────────────────────────────────────────────────────
-    def _build_telemetry_panel(self, parent):
+    def _build_controls_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📊 Giám Sát Trạng Thái & Telemetry ",
-            font=("Segoe UI", 9, "bold"),
+            text=" 🎮 Điều Khiển Xe (Phím: W/A/S/D/Space/X/Z/E/F2 hoặc Webcam Lái Tay) ",
+            font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
@@ -554,190 +734,122 @@ class GroundStationApp:
             padx=10,
             pady=6
         )
-        card.pack(fill=tk.X, pady=(0, 6))
+        card.pack(fill=tk.X, pady=(0, 8))
 
-        row_state = tk.Frame(card, bg=THEME["card"])
-        row_state.pack(fill=tk.X, pady=(0, 6))
-
-        self.lbl_robot_state = tk.Label(
-            row_state,
-            text="DISARMED",
-            font=("Segoe UI", 12, "bold"),
-            fg="#11111b",
-            bg=THEME["warning"],
-            padx=10,
-            pady=2,
-            relief=tk.FLAT
-        )
-        self.lbl_robot_state.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-
-        self.lbl_nrf_link = tk.Label(
-            row_state,
-            text="SÓNG NRF: CHỜ XE...",
-            font=("Segoe UI", 9, "bold"),
-            fg=THEME["warning"],
-            bg=THEME["card_alt"],
-            padx=8,
-            pady=2
-        )
-        self.lbl_nrf_link.pack(side=tk.RIGHT, fill=tk.X, expand=True)
-
-        tilt_card = tk.Frame(card, bg=THEME["card_alt"], padx=8, pady=6, relief=tk.GROOVE, bd=1)
-        tilt_card.pack(fill=tk.X, pady=(0, 6))
-
-        top_tilt = tk.Frame(tilt_card, bg=THEME["card_alt"])
-        top_tilt.pack(fill=tk.X)
-
-        tk.Label(top_tilt, text="GÓC PITCH:", font=("Segoe UI", 8, "bold"), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(side=tk.LEFT)
-        self.lbl_pitch_val = tk.Label(top_tilt, text="0.00°", font=("Segoe UI", 12, "bold"), fg=THEME["success"], bg=THEME["card_alt"])
-        self.lbl_pitch_val.pack(side=tk.RIGHT)
-
-        self.canvas_tilt = tk.Canvas(tilt_card, height=14, bg="#11111b", highlightthickness=0)
-        self.canvas_tilt.pack(fill=tk.X, pady=(4, 0))
-        self.canvas_tilt.bind("<Configure>", lambda e: self._draw_tilt_gauge())
-
-        grid_frame = tk.Frame(card, bg=THEME["card"])
-        grid_frame.pack(fill=tk.X, pady=(0, 4))
-
-        b1 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
-        b1.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        tk.Label(b1, text="Tốc độ Gyro", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_gyro_val = tk.Label(b1, text="0.0 °/s", font=("Segoe UI", 10, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
-        self.lbl_gyro_val.pack(anchor="w")
-
-        b2 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
-        b2.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
-        tk.Label(b2, text="Pin 4S", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_bat_val = tk.Label(b2, text="--.- V", font=("Segoe UI", 10, "bold"), fg=THEME["primary"], bg=THEME["card_alt"])
-        self.lbl_bat_val.pack(anchor="w")
-
-        b3 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
-        b3.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
-        tk.Label(b3, text="Vật cản", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_dist_val = tk.Label(b3, text="-- cm", font=("Segoe UI", 10, "bold"), fg=THEME["text"], bg=THEME["card_alt"])
-        self.lbl_dist_val.pack(anchor="w")
-
-        b4 = tk.Frame(grid_frame, bg=THEME["card_alt"], padx=6, pady=4)
-        b4.grid(row=1, column=1, sticky="nsew", padx=2, pady=2)
-        tk.Label(b4, text="Drive / Steer", font=("Segoe UI", 7), fg=THEME["subtext"], bg=THEME["card_alt"]).pack(anchor="w")
-        self.lbl_cmd_val = tk.Label(b4, text="0 / 0", font=("Segoe UI", 10, "bold"), fg=THEME["accent"], bg=THEME["card_alt"])
-        self.lbl_cmd_val.pack(anchor="w")
-
-        grid_frame.columnconfigure(0, weight=1)
-        grid_frame.columnconfigure(1, weight=1)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 4: BẢNG ĐIỀU KHIỂN 8 HƯỚNG & LÁI BẰNG CỬ CHỈ TAY MEDIAPIPE
-    # ──────────────────────────────────────────────────────────────────────────
-    def _build_controls_8way_panel(self, parent):
-        card = tk.LabelFrame(
-            parent,
-            text=" 🎮 Điều Khiển 8 Hướng & Cử Chỉ Bàn Tay (MediaPipe Hands) ",
-            font=("Segoe UI", 9, "bold"),
-            fg=THEME["primary"],
-            bg=THEME["card"],
-            bd=1,
-            relief=tk.SOLID,
-            padx=10,
-            pady=6
-        )
-        card.pack(fill=tk.X, pady=(0, 6))
-
-        # Hàng 1: Nút trạng thái chính + Nút bật Lái Cử Chỉ Tay MediaPipe
+        # Hàng 1: ARM, DISARM, ESTOP, LÁI TAY
         act_row = tk.Frame(card, bg=THEME["card"])
         act_row.pack(fill=tk.X, pady=(0, 6))
 
-        btn_arm = tk.Button(
-            act_row, text="🟢 ARM (X)", font=("Segoe UI", 8, "bold"),
+        tk.Button(
+            act_row, text="🟢 ARM (X)", font=("Segoe UI", 9, "bold"),
             bg="#2e7d32", fg="#ffffff", activebackground=THEME["success"],
-            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_arm
-        )
-        btn_arm.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            relief=tk.FLAT, padx=8, pady=5, command=self.cmd_arm
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        btn_disarm = tk.Button(
-            act_row, text="🟡 DISARM (Z/V)", font=("Segoe UI", 8, "bold"),
+        tk.Button(
+            act_row, text="🟡 DISARM (Z)", font=("Segoe UI", 9, "bold"),
             bg="#f57f17", fg="#11111b", activebackground=THEME["warning"],
-            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_disarm
-        )
-        btn_disarm.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            relief=tk.FLAT, padx=8, pady=5, command=self.cmd_disarm
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        btn_estop = tk.Button(
-            act_row, text="🛑 ESTOP (Esc)", font=("Segoe UI", 8, "bold"),
+        tk.Button(
+            act_row, text="🛑 ESTOP (E)", font=("Segoe UI", 9, "bold"),
             bg="#c62828", fg="#ffffff", activebackground=THEME["danger"],
-            relief=tk.FLAT, padx=6, pady=4, command=self.cmd_estop
-        )
-        btn_estop.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            relief=tk.FLAT, padx=8, pady=5, command=self.cmd_estop
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
         self.btn_hand_mode = tk.Button(
-            act_row, text="✋ LÁI TAY: TẮT", font=("Segoe UI", 8, "bold"),
-            bg=THEME["card_alt"], fg=THEME["text"], activebackground=THEME["accent"],
-            relief=tk.FLAT, padx=6, pady=4, command=self.toggle_hand_mode
+            act_row, text="✋ LÁI TAY: TẮT", font=("Segoe UI", 9, "bold"),
+            bg=THEME["card_alt"], fg=THEME["text"],
+            relief=tk.FLAT, padx=8, pady=5, command=self.toggle_hand_mode
         )
         self.btn_hand_mode.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        # Hàng 2: D-Pad 8 hướng + Thanh trượt + Khung Mini Preview Cử Chỉ Tay
-        ctrl_split = tk.Frame(card, bg=THEME["card"])
-        ctrl_split.pack(fill=tk.X, pady=2)
-
-        # 3x3 D-Pad
-        dpad = tk.Frame(ctrl_split, bg=THEME["card_alt"], padx=6, pady=6, relief=tk.GROOVE, bd=1)
-        dpad.pack(side=tk.LEFT, padx=(0, 6))
-
-        btn_nw = tk.Button(dpad, text="↖ Q", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_left)
-        btn_nw.grid(row=0, column=0, padx=2, pady=2)
-
-        btn_n = tk.Button(dpad, text="▲ W", width=7, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd)
-        btn_n.grid(row=0, column=1, padx=2, pady=2)
-
-        btn_ne = tk.Button(dpad, text="↗ E", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_fwd_right)
-        btn_ne.grid(row=0, column=2, padx=2, pady=2)
-
-        btn_w = tk.Button(dpad, text="◄ A", width=5, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_left)
-        btn_w.grid(row=1, column=0, padx=2, pady=2)
-
-        btn_stop = tk.Button(dpad, text="■ STOP", width=7, font=("Segoe UI", 8, "bold"), bg="#c62828", fg="#ffffff", relief=tk.FLAT, command=self.cmd_stop)
-        btn_stop.grid(row=1, column=1, padx=2, pady=2)
-
-        btn_e = tk.Button(dpad, text="► D", width=5, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_right)
-        btn_e.grid(row=1, column=2, padx=2, pady=2)
-
-        btn_sw = tk.Button(dpad, text="↙ Z", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_left)
-        btn_sw.grid(row=2, column=0, padx=2, pady=2)
-
-        btn_s = tk.Button(dpad, text="▼ S", width=7, font=("Segoe UI", 8, "bold"), bg="#45475a", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd)
-        btn_s.grid(row=2, column=1, padx=2, pady=2)
-
-        btn_se = tk.Button(dpad, text="↘ C", width=5, font=("Segoe UI", 8, "bold"), bg="#313244", fg=THEME["text"], relief=tk.FLAT, command=self.cmd_bwd_right)
-        btn_se.grid(row=2, column=2, padx=2, pady=2)
-
-        # Thanh trượt
-        sliders = tk.Frame(ctrl_split, bg=THEME["card"])
-        sliders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
-
-        tk.Label(sliders, text="Tốc độ Tiến/Lùi:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
-        self.slider_speed_step = tk.Scale(
-            sliders, from_=100, to=600, orient=tk.HORIZONTAL,
-            bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
+        self.btn_adas = tk.Button(
+            act_row,
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.FLAT,
+            padx=8,
+            pady=5,
+            command=self.toggle_adas
         )
-        self.slider_speed_step.set(200)
+        self.btn_adas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self._set_adas_state(self.adas_enabled)
+
+        gamepad_row = tk.Frame(card, bg=THEME["card"])
+        gamepad_row.pack(fill=tk.X, pady=(0, 6))
+        self.btn_gamepad = tk.Button(
+            gamepad_row,
+            text="🎮 TAY CẦM USB: TẮT",
+            font=("Segoe UI", 9, "bold"),
+            bg=THEME["card_alt"],
+            fg=THEME["text"],
+            relief=tk.FLAT,
+            padx=8,
+            pady=4,
+            command=self.toggle_gamepad
+        )
+        self.btn_gamepad.pack(side=tk.LEFT, padx=(0, 8))
+        self.lbl_gamepad_status = tk.Label(
+            gamepad_row,
+            text="Joystick trái: tiến/lùi | Joystick phải: rẽ | Nút 1 ARM/DISARM, 2 STOP, 3 ESTOP",
+            font=("Segoe UI", 8),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
+        )
+        self.lbl_gamepad_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Hàng 2: D-Pad + Thanh trượt + Khung xem trước Webcam lái tay
+        dpad_frame = tk.Frame(card, bg=THEME["card"])
+        dpad_frame.pack(fill=tk.X)
+
+        pad = tk.Frame(dpad_frame, bg=THEME["card"])
+        pad.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_fwd = tk.Button(pad, text="▲ Tiến (W)", width=9, bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT)
+        btn_fwd.grid(row=0, column=1, pady=2)
+        self._bind_momentary_button(btn_fwd, "button:fwd", "forward")
+
+        btn_left = tk.Button(pad, text="◄ Trái (A)", width=9, bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT)
+        btn_left.grid(row=1, column=0, padx=2)
+        self._bind_momentary_button(btn_left, "button:left", "left")
+
+        btn_stop = tk.Button(pad, text="■ STOP", width=10, bg="#37474f", fg="#ffffff", relief=tk.FLAT)
+        btn_stop.grid(row=1, column=1, padx=2)
+        btn_stop.bind("<ButtonPress-1>", lambda _event: self._press_stop_input())
+        btn_stop.bind("<ButtonRelease-1>", lambda _event: self._release_stop_input())
+
+        btn_right = tk.Button(pad, text="► Phải (D)", width=9, bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT)
+        btn_right.grid(row=1, column=2, padx=2)
+        self._bind_momentary_button(btn_right, "button:right", "right")
+
+        btn_bwd = tk.Button(pad, text="▼ Lùi (S)", width=9, bg=THEME["card_alt"], fg=THEME["text"], relief=tk.FLAT)
+        btn_bwd.grid(row=2, column=1, pady=2)
+        self._bind_momentary_button(btn_bwd, "button:bwd", "backward")
+
+        sliders = tk.Frame(dpad_frame, bg=THEME["card"])
+        sliders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6)
+
+        tk.Label(sliders, text="Tốc độ đặt:", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
+        self.slider_speed_step = tk.Scale(
+            sliders, from_=50, to=400, orient=tk.HORIZONTAL,
+            bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b",
+            command=self._update_speed_limit
+        )
+        self.slider_speed_step.set(150)
         self.slider_speed_step.pack(fill=tk.X, pady=(0, 2))
 
-        tk.Label(sliders, text="Độ nhạy Rẽ/Quay:", font=("Segoe UI", 7, "bold"), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
+        tk.Label(sliders, text="Độ nhạy rẽ:", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["card"]).pack(anchor="w")
         self.slider_steer_step = tk.Scale(
-            sliders, from_=100, to=500, orient=tk.HORIZONTAL,
-            bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b"
+            sliders, from_=50, to=500, orient=tk.HORIZONTAL,
+            bg=THEME["card_alt"], fg=THEME["text"], highlightthickness=0, troughcolor="#11111b",
+            command=self._update_steer_limit
         )
-        self.slider_steer_step.set(250)
-        self.slider_steer_step.pack(fill=tk.X, pady=(0, 2))
+        self.slider_steer_step.set(200)
+        self.slider_steer_step.pack(fill=tk.X)
 
-        self.lbl_active_direction = tk.Label(
-            sliders, text="HƯỚNG: TĨNH (STOP)", font=("Segoe UI", 8, "bold"),
-            fg=THEME["primary"], bg=THEME["card_alt"], pady=2
-        )
-        self.lbl_active_direction.pack(fill=tk.X)
-
-        # Khung Mini Preview Cử Chỉ Tay (MediaPipe Webcam)
-        hand_box = tk.Frame(ctrl_split, bg=THEME["card_alt"], bd=1, relief=tk.SOLID)
+        # Khung mini preview Webcam nhận diện bàn tay
+        hand_box = tk.Frame(dpad_frame, bg=THEME["card_alt"], bd=1, relief=tk.SOLID)
         hand_box.pack(side=tk.RIGHT, padx=(4, 0))
 
         self.hand_canvas = tk.Canvas(hand_box, width=148, height=110, bg="#0b0b12", highlightthickness=0)
@@ -750,20 +862,269 @@ class GroundStationApp:
             74, 55, text=text, fill=THEME["subtext"], font=("Segoe UI", 8), justify=tk.CENTER
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # QUẢN LÝ CHẾ ĐỘ ĐIỀU KHIỂN CỬ CHỈ BÀN TAY (MEDIAPIPE HANDS)
-    # ──────────────────────────────────────────────────────────────────────────
+    def _update_speed_limit(self, value):
+        with self._control_limits_lock:
+            self._control_limits = (int(float(value)), self._control_limits[1])
+
+    def _update_steer_limit(self, value):
+        with self._control_limits_lock:
+            self._control_limits = (self._control_limits[0], int(float(value)))
+
+    def _get_control_limits(self):
+        with self._control_limits_lock:
+            return self._control_limits
+
     def toggle_hand_mode(self):
         if self.hand_mode_enabled:
             self.stop_hand_mode()
         else:
             self.start_hand_mode()
 
-    def start_hand_mode(self):
-        if HandGestureWorker is None:
-            messagebox.showerror("Lỗi", "Không tìm thấy module hand_controller.py hoặc mediapipe!")
+    def toggle_gamepad(self):
+        if self.gamepad_enabled:
+            was_connected = self.gamepad_connected
+            self.gamepad_enabled = False
+            if self._gamepad_poll_after_id is not None:
+                self.root.after_cancel(self._gamepad_poll_after_id)
+                self._gamepad_poll_after_id = None
+            self._close_gamepad(shutdown=True)
+            if was_connected:
+                self.cmd_stop()
+            self.btn_gamepad.config(text="🎮 TAY CẦM USB: TẮT", bg=THEME["card_alt"], fg=THEME["text"])
+            self.lbl_gamepad_status.config(text="Tay cầm đã tắt; xe dừng lệnh di chuyển và giữ trạng thái ARM.", fg=THEME["subtext"])
             return
 
+        if pygame is None:
+            self.lbl_gamepad_status.config(text="Thiếu pygame; cài dependencies trong requirements.txt.", fg=THEME["danger"])
+            self.log_console("[Gamepad Lỗi] Không import được pygame. Cài App_python/requirements.txt.", "ERROR")
+            return
+
+        if self.hand_mode_enabled:
+            self.stop_hand_mode()
+
+        self._cancel_drive_timers()
+        self._active_drive_inputs.clear()
+        self._reset_drive_axis_state()
+        self.drive_cmd = 0
+        self.steer_cmd = 0
+        self.send_serial_cmd("DRIVE 0 0")
+
+        try:
+            # The dummy display backend keeps SDL event pumping separate from OpenCV's camera backend.
+            pygame.display.init()
+            pygame.joystick.init()
+            self.gamepad_enabled = True
+            self.gamepad_last_scan_ms = 0.0
+            self.btn_gamepad.config(text="🎮 TAY CẦM USB: BẬT", bg=THEME["accent"], fg="#11111b")
+            self.lbl_gamepad_status.config(text="Đang tìm tay cầm USB...", fg=THEME["warning"])
+            self._schedule_gamepad_poll()
+        except pygame.error as exc:
+            self.gamepad_enabled = False
+            self._close_gamepad(shutdown=True)
+            self.lbl_gamepad_status.config(text=f"Lỗi khởi tạo tay cầm: {exc}", fg=THEME["danger"])
+            self.log_console(f"[Gamepad Lỗi] Không khởi tạo được pygame joystick: {exc}", "ERROR")
+
+    def _close_gamepad(self, shutdown=False):
+        if self.gamepad is not None:
+            try:
+                self.gamepad.quit()
+            except pygame.error:
+                pass
+            self.gamepad = None
+        if shutdown and pygame is not None:
+            try:
+                pygame.joystick.quit()
+                pygame.display.quit()
+            except pygame.error:
+                pass
+        self.gamepad_connected = False
+        self.gamepad_buttons = [False, False, False, False]
+        self.gamepad_ignore_button_edges = True
+        self.gamepad_last_drive = 0
+        self.gamepad_last_steer = 0
+        self.gamepad_drive_baseline = 0.0
+        self.gamepad_steer_baseline = 0.0
+        self.gamepad_baseline_ready = False
+        self.gamepad_last_drive = None
+        self.gamepad_last_steer = None
+
+    def _handle_gamepad_disconnect(self):
+        self.gamepad_enabled = False
+        self._close_gamepad(shutdown=True)
+        if self._gamepad_poll_after_id is not None:
+            self.root.after_cancel(self._gamepad_poll_after_id)
+            self._gamepad_poll_after_id = None
+        self.btn_gamepad.config(text="🎮 TAY CẦM USB: TẮT", bg=THEME["card_alt"], fg=THEME["text"])
+        self.cmd_stop()
+        if self.serial_running:
+            status = "Mất tay cầm; GCS còn kết nối. Xe đã dừng lệnh joystick, có thể chuyển sang webcam/phím."
+            self.lbl_gamepad_status.config(text=status, fg=THEME["warning"])
+            self.log_console("[Gamepad] Mất tay cầm; đã gửi STOP, giữ trạng thái ARM để chuyển sang điều khiển GCS khác.", "WARN")
+        else:
+            status = "Mất tay cầm và mất Serial GCS; không thể gửi lệnh chuyển tiếp."
+            self.lbl_gamepad_status.config(text=status, fg=THEME["danger"])
+            self.log_console("[Gamepad] Mất tay cầm khi Serial GCS không kết nối; không gửi được lệnh STOP.", "ERROR")
+
+    def _schedule_gamepad_poll(self):
+        if self.gamepad_enabled and self._gamepad_poll_after_id is None:
+            self._gamepad_poll_after_id = self.root.after(GAMEPAD_POLL_MS, self._gamepad_poll_tick)
+
+    def _gamepad_poll_tick(self):
+        self._gamepad_poll_after_id = None
+        if not self.gamepad_enabled:
+            return
+        self._poll_gamepad()
+        self._schedule_gamepad_poll()
+
+    def _poll_gamepad(self):
+        if not self.gamepad_enabled or pygame is None:
+            return
+
+        try:
+            pygame.event.pump()
+            if self.gamepad is None:
+                now_ms = time.monotonic() * 1000.0
+                if (now_ms - self.gamepad_last_scan_ms) < GAMEPAD_RECONNECT_MS:
+                    return
+                self.gamepad_last_scan_ms = now_ms
+                if pygame.joystick.get_count() == 0:
+                    self.lbl_gamepad_status.config(text="Chưa tìm thấy tay cầm USB; đang tìm lại...", fg=THEME["warning"])
+                    return
+
+                self.gamepad = pygame.joystick.Joystick(0)
+                self.gamepad.init()
+                self.gamepad_connected = True
+                self.gamepad_buttons = [False, False, False, False]
+                self.gamepad_ignore_button_edges = True
+                self.gamepad_last_drive = 0
+                self.gamepad_last_steer = 0
+                self.gamepad_last_tx_ms = 0.0
+                axis_count = self.gamepad.get_numaxes()
+                baseline_drive = -self.gamepad.get_axis(1) if axis_count > 1 else 0.0
+                baseline_steer = self.gamepad.get_axis(2) if axis_count > 2 else 0.0
+                self.gamepad_drive_baseline = baseline_drive
+                self.gamepad_steer_baseline = baseline_steer
+                self.gamepad_baseline_ready = True
+                self.gamepad_last_drive = None
+                self.gamepad_last_steer = None
+                self.gamepad_last_tx_ms = 0.0
+                name = self.gamepad.get_name()
+                self.lbl_gamepad_status.config(text=f"Đã kết nối: {name} | Trục Y trái: tiến/lùi, trục X phải: rẽ", fg=THEME["success"])
+                self.log_console(f"[Gamepad] Đã kết nối tay cầm USB: {name}", "SUCCESS")
+
+            if pygame.joystick.get_count() == 0 or not self.gamepad.get_init():
+                self._handle_gamepad_disconnect()
+                return
+
+            button_count = self.gamepad.get_numbuttons()
+            buttons = [
+                (index < button_count and bool(self.gamepad.get_button(index)))
+                for index in range(4)
+            ]
+            if self.gamepad_ignore_button_edges:
+                pressed = [False, False, False, False]
+                self.gamepad_ignore_button_edges = False
+            else:
+                pressed = [buttons[i] and not self.gamepad_buttons[i] for i in range(4)]
+            self.gamepad_buttons = buttons
+
+            if pressed[0]:
+                if self.robot_state_str == "ARMED":
+                    self.cmd_disarm()
+                elif self.robot_state_str == "DISARMED":
+                    self.cmd_arm()
+                else:
+                    self.log_console(f"[Gamepad] ARM/DISARM không khả dụng khi trạng thái là {self.robot_state_str}.", "WARN")
+            if pressed[1]:
+                self.cmd_stop()
+            if pressed[2]:
+                self.cmd_estop()
+
+            if buttons[1] or self._stop_input_active:
+                drive_cmd = 0
+                steer_cmd = 0
+            else:
+                axis_count = self.gamepad.get_numaxes()
+                raw_drive_axis = -self.gamepad.get_axis(1) if axis_count > 1 else 0.0
+                raw_steer_axis = self.gamepad.get_axis(2) if axis_count > 2 else 0.0
+
+                if self.gamepad_baseline_ready:
+                    drive_delta = raw_drive_axis - self.gamepad_drive_baseline
+                    steer_delta = raw_steer_axis - self.gamepad_steer_baseline
+                else:
+                    drive_delta = raw_drive_axis
+                    steer_delta = raw_steer_axis
+
+                drive_delta = max(-1.0, min(1.0, drive_delta))
+                steer_delta = max(-1.0, min(1.0, steer_delta))
+                drive_axis = drive_delta if abs(drive_delta) >= GAMEPAD_DEADZONE else 0.0
+                steer_axis = steer_delta if abs(steer_delta) >= GAMEPAD_DEADZONE else 0.0
+                drive_axis = -self.gamepad.get_axis(1) if axis_count > 1 else 0.0
+                steer_axis = self.gamepad.get_axis(2) if axis_count > 2 else 0.0
+                if abs(drive_axis) < GAMEPAD_DEADZONE:
+                    drive_axis = 0.0
+                if abs(steer_axis) < GAMEPAD_DEADZONE:
+                    steer_axis = 0.0
+                drive_cmd = int(round(drive_axis * int(self.slider_speed_step.get())))
+                steer_cmd = int(round(steer_axis * int(self.slider_steer_step.get())))
+
+            if self.robot_state_str != "ARMED":
+                drive_cmd = 0
+                steer_cmd = 0
+
+            now_ms = time.monotonic() * 1000.0
+            changed = (drive_cmd != self.gamepad_last_drive or
+                       steer_cmd != self.gamepad_last_steer)
+            gamepad_active = (drive_cmd != 0 or steer_cmd != 0)
+            should_send = changed
+            if gamepad_active and (now_ms - self.gamepad_last_tx_ms) >= DRIVE_REPEAT_MS:
+                should_send = True
+
+            if should_send:
+                self.drive_cmd = drive_cmd
+                self.steer_cmd = steer_cmd
+                if self.serial_running and (gamepad_active or changed):
+            if changed or (now_ms - self.gamepad_last_tx_ms) >= DRIVE_REPEAT_MS:
+                self.drive_cmd = drive_cmd
+                self.steer_cmd = steer_cmd
+                if self.serial_running:
+                    self.send_serial_cmd(f"DRIVE {drive_cmd} {steer_cmd}")
+                self.gamepad_last_drive = drive_cmd
+                self.gamepad_last_steer = steer_cmd
+                self.gamepad_last_tx_ms = now_ms
+        except pygame.error as exc:
+            if self.gamepad_connected:
+                self.log_console(f"[Gamepad Lỗi] Tay cầm không còn khả dụng: {exc}", "WARN")
+                self._handle_gamepad_disconnect()
+            else:
+                self.gamepad_enabled = False
+                self._close_gamepad(shutdown=True)
+                self.lbl_gamepad_status.config(text=f"Lỗi đọc tay cầm: {exc}", fg=THEME["danger"])
+                self.log_console(f"[Gamepad Lỗi] Không đọc được joystick: {exc}", "ERROR")
+
+    def start_hand_mode(self):
+        if self.gamepad_enabled:
+            was_connected = self.gamepad_connected
+            self.gamepad_enabled = False
+            if self._gamepad_poll_after_id is not None:
+                self.root.after_cancel(self._gamepad_poll_after_id)
+                self._gamepad_poll_after_id = None
+            self._close_gamepad(shutdown=True)
+            self._cancel_drive_timers()
+            self._active_drive_inputs.clear()
+            self._reset_drive_axis_state()
+            self.drive_cmd = 0
+            self.steer_cmd = 0
+            if self.serial_running:
+                self.send_serial_cmd("DRIVE 0 0")
+            self.btn_gamepad.config(text="🎮 TAY CẦM USB: TẮT", bg=THEME["card_alt"], fg=THEME["text"])
+            status = "Đã chuyển sang webcam; tay cầm đã ngắt điều khiển."
+            self.lbl_gamepad_status.config(text=status, fg=THEME["subtext"])
+            self.log_console(
+                "[Gesture] Chuyển nguồn điều khiển từ tay cầm sang webcam"
+                + ("." if was_connected else " (tay cầm chưa kết nối)."),
+                "INFO"
+            )
         self.hand_mode_enabled = True
         self._hand_was_active = False
         self.btn_hand_mode.config(text="✋ LÁI TAY: BẬT", bg=THEME["accent"], fg="#11111b")
@@ -771,13 +1132,13 @@ class GroundStationApp:
 
         self.hand_worker = HandGestureWorker(
             cam_index=0,
-            get_limits_fn=lambda: (int(self.slider_speed_step.get()), int(self.slider_steer_step.get())),
+            get_limits_fn=self._get_control_limits,
             on_control=self._on_hand_control,
             on_frame=self._on_hand_frame,
             on_status=self._on_hand_status
         )
+        self._hand_preview_error_reported = False
         self.hand_worker.start()
-        self._log_console("[GESTURE] Bắt đầu chế độ lái bằng cử chỉ tay MediaPipe.", "info")
 
     def stop_hand_mode(self):
         self.hand_mode_enabled = False
@@ -791,7 +1152,7 @@ class GroundStationApp:
         if self._hand_was_active or self.drive_cmd != 0 or self.steer_cmd != 0:
             self._hand_was_active = False
             self.cmd_stop()
-        self._log_console("[GESTURE] Đã tắt chế độ lái bằng cử chỉ tay.", "warn")
+        self.log_console("[Gesture] Đã TẮT chế độ lái bằng tay.", "WARN")
 
     def _on_hand_frame(self, frame_bgr):
         self.hand_frame = frame_bgr
@@ -799,33 +1160,321 @@ class GroundStationApp:
     def _on_hand_status(self, msg, is_ok):
         def _update():
             if is_ok:
-                self._log_console(f"[GESTURE] {msg}", "info")
+                self.log_console(f"[Gesture] {msg}", "SUCCESS")
             else:
-                self._log_console(f"[GESTURE LỖI] {msg}", "err")
+                self.log_console(f"[Gesture Lỗi] {msg}", "ERROR")
                 self.stop_hand_mode()
         self.root.after(0, _update)
 
     def _on_hand_control(self, drive_val, steer_val, hand_found):
         if not self.hand_mode_enabled:
             return
+        if self._stop_input_active:
+            return
         if hand_found:
             self._hand_was_active = True
             self.drive_cmd = drive_val
             self.steer_cmd = steer_val
-            self.send_serial_command(f"DRIVE {drive_val} {steer_val}")
-            self.lbl_active_direction.config(text=f"✋ LÁI: D={drive_val} S={steer_val}")
+            self.root.after(0, self._dispatch_drive)
         elif self._hand_was_active:
             self._hand_was_active = False
-            self.cmd_stop()
+            self.root.after(0, self.cmd_stop)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # PANEL 5: TERMINAL CONSOLE & GỬI LỆNH TRỰC TIẾP
+    # BÀN PHÍM AN TOÀN (KHÔNG KÍCH HOẠT NHẦM KHI GÕ VĂN BẢN)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _bind_momentary_button(self, button, token, direction):
+        button.bind(
+            "<ButtonPress-1>",
+            lambda _event, input_token=token, movement=direction:
+                self._start_drive_input(input_token, movement)
+        )
+        button.bind(
+            "<ButtonRelease-1>",
+            lambda _event, input_token=token:
+                self._release_drive_input(input_token)
+        )
+
+    def _bind_keyboard_controls(self):
+        self.root.bind("<KeyPress>", self._on_key_press)
+        self.root.bind("<KeyRelease>", self._on_key_release)
+
+    def _on_key_press(self, event):
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+            return
+
+        key = event.keysym.lower()
+        if key in self._pressed_keys:
+            return
+        self._pressed_keys.add(key)
+
+        movement = {
+            "w": "forward",
+            "s": "backward",
+            "a": "left",
+            "d": "right",
+        }.get(key)
+        if movement:
+            self._start_drive_input(f"key:{key}", movement)
+        elif key in ("space", "r"):
+            self._press_stop_input()
+        elif key == "x":
+            self.cmd_arm()
+        elif key == "z":
+            self.cmd_disarm()
+        elif key == "e":
+            self.cmd_estop()
+        elif key == "f2":
+            self.toggle_adas()
+
+    def _on_key_release(self, event):
+        key = event.keysym.lower()
+        self._pressed_keys.discard(key)
+        if key in ("w", "s", "a", "d"):
+            self._release_drive_input(f"key:{key}")
+        elif key in ("space", "r"):
+            self._release_stop_input()
+
+    def send_serial_cmd(self, cmd_text):
+        if not self.serial_client or not self.serial_client.is_open:
+            self.log_console("[Lỗi gửi] Chưa kết nối ESP32 DevKit V1!", "WARN")
+            return
+        try:
+            self.serial_client.write_line(cmd_text)
+            self.tx_count += 1
+            self.log_console(f"TX: {cmd_text}", "TX")
+        except Exception as e:
+            self.log_console(f"[Lỗi gửi Serial] {e}", "ERROR")
+            self.disconnect_serial(is_unexpected=True)
+
+    def cmd_arm(self):
+        self.send_serial_cmd("ARM")
+
+    def cmd_disarm(self):
+        self._cancel_drive_timers()
+        self._active_drive_inputs.clear()
+        self._reset_drive_axis_state()
+        self.drive_cmd = 0
+        self.steer_cmd = 0
+        self.send_serial_cmd("DISARM")
+
+    def cmd_estop(self):
+        self._cancel_drive_timers()
+        self._active_drive_inputs.clear()
+        self._reset_drive_axis_state()
+        self.drive_cmd = 0
+        self.steer_cmd = 0
+        self.send_serial_cmd("ESTOP")
+
+    def _set_adas_state(self, enabled):
+        self.adas_enabled = bool(enabled)
+        if not hasattr(self, "btn_adas"):
+            return
+        if self.adas_enabled:
+            self.btn_adas.config(
+                text="ADAS: ON (An toàn)",
+                bg="#2e7d32",
+                fg="#ffffff",
+                activebackground=THEME["success"]
+            )
+        else:
+            self.btn_adas.config(
+                text="ADAS: OFF (Chế độ Đua)",
+                bg="#c65d0e",
+                fg="#ffffff",
+                activebackground=THEME["warning"]
+            )
+
+    def _send_adas_state(self, log_state=False):
+        self.send_serial_cmd(f"ADAS:{1 if self.adas_enabled else 0}")
+        if log_state:
+            self._log_adas_state()
+
+    def _log_adas_state(self):
+        if self.adas_enabled:
+            self.log_console("[ADAS] Đã BẬT tránh vật cản", "SUCCESS")
+        else:
+            self.log_console("[ADAS] Đã TẮT tránh vật cản - Chế độ Đua", "WARN")
+
+    def toggle_adas(self):
+        self._set_adas_state(not self.adas_enabled)
+        self._send_adas_state(log_state=True)
+
+    def _cancel_drive_timers(self):
+        if self._drive_repeat_after_id is not None:
+            self.root.after_cancel(self._drive_repeat_after_id)
+            self._drive_repeat_after_id = None
+
+    def _reset_drive_axis_state(self):
+        for axis in ("drive", "steer"):
+            self._drive_axis_active[axis] = False
+            self._drive_axis_started_at[axis] = None
+            self._drive_axis_deadline[axis] = None
+            self._drive_axis_hold_value[axis] = 0
+
+    def _press_stop_input(self):
+        self._stop_input_active = True
+        self.cmd_stop()
+
+    def _release_stop_input(self):
+        self._stop_input_active = False
+
+    def _set_drive_from_active_inputs(self):
+        directions = set(self._active_drive_inputs.values())
+        speed = int(self.slider_speed_step.get())
+        steer_step = int(self.slider_steer_step.get())
+        desired = {
+            "drive": (int("forward" in directions) - int("backward" in directions)) * speed,
+            "steer": (int("right" in directions) - int("left" in directions)) * steer_step,
+        }
+        requested = {
+            "drive": "forward" in directions or "backward" in directions,
+            "steer": "right" in directions or "left" in directions,
+        }
+        minimum_ms = {"drive": MIN_PULSE_DRIVE_MS, "steer": MIN_PULSE_STEER_MS}
+        now = time.monotonic()
+
+        for axis, attr in (("drive", "drive_cmd"), ("steer", "steer_cmd")):
+            current_value = getattr(self, attr)
+            desired_value = desired[axis]
+            deadline = self._drive_axis_deadline[axis]
+
+            if requested[axis]:
+                held_value = self._drive_axis_hold_value[axis]
+                if desired_value == 0:
+                    self._drive_axis_started_at[axis] = None
+                    self._drive_axis_deadline[axis] = None
+                    self._drive_axis_hold_value[axis] = 0
+                elif not self._drive_axis_active[axis]:
+                    if deadline is None or (held_value != 0 and held_value * desired_value < 0):
+                        self._drive_axis_started_at[axis] = now
+                    self._drive_axis_deadline[axis] = None
+                    self._drive_axis_hold_value[axis] = 0
+                elif self._drive_axis_started_at[axis] is None or current_value * desired_value < 0:
+                    self._drive_axis_started_at[axis] = now
+
+                setattr(self, attr, desired_value)
+                self._drive_axis_active[axis] = True
+                continue
+
+            if self._drive_axis_active[axis]:
+                self._drive_axis_active[axis] = False
+                started_at = self._drive_axis_started_at[axis]
+                if current_value != 0 and started_at is not None:
+                    deadline = started_at + minimum_ms[axis] / 1000.0
+                    if now < deadline:
+                        self._drive_axis_deadline[axis] = deadline
+                        self._drive_axis_hold_value[axis] = current_value
+                        setattr(self, attr, current_value)
+                        continue
+
+            if deadline is not None and now < deadline:
+                setattr(self, attr, self._drive_axis_hold_value[axis])
+            else:
+                self._drive_axis_started_at[axis] = None
+                self._drive_axis_deadline[axis] = None
+                self._drive_axis_hold_value[axis] = 0
+                setattr(self, attr, 0)
+
+    def _send_drive_command(self):
+        self._set_drive_from_active_inputs()
+        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+
+    def _start_drive_input(self, token, direction):
+        if self.gamepad_enabled or self._stop_input_active or token in self._active_drive_inputs:
+            return
+
+        self._active_drive_inputs[token] = direction
+        self._send_drive_command()
+        self._schedule_drive_repeat()
+
+    def _repeat_drive_command(self):
+        self._drive_repeat_after_id = None
+        if not self._active_drive_inputs and not any(self._drive_axis_deadline.values()):
+            return
+        self._send_drive_command()
+        self._schedule_drive_repeat()
+
+    def _schedule_drive_repeat(self):
+        if self._drive_repeat_after_id is not None:
+            self.root.after_cancel(self._drive_repeat_after_id)
+            self._drive_repeat_after_id = None
+
+        deadlines = [deadline for deadline in self._drive_axis_deadline.values() if deadline is not None]
+        if not self._active_drive_inputs and not deadlines:
+            return
+
+        delay_ms = DRIVE_REPEAT_MS
+        if not self._active_drive_inputs:
+            remaining_ms = max(1, int((min(deadlines) - time.monotonic()) * 1000.0 + 0.999))
+            delay_ms = min(delay_ms, remaining_ms)
+        self._drive_repeat_after_id = self.root.after(delay_ms, self._repeat_drive_command)
+
+
+    def _send_drive_command(self):
+        self._set_drive_from_active_inputs()
+        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+
+    def _start_drive_input(self, token, direction):
+        if self.gamepad_enabled or self._stop_input_active or token in self._active_drive_inputs:
+            return
+
+        self._active_drive_inputs[token] = direction
+        self._send_drive_command()
+        self._schedule_drive_repeat()
+
+    def _repeat_drive_command(self):
+        self._drive_repeat_after_id = None
+        if not self._active_drive_inputs and not any(self._drive_axis_deadline.values()):
+            return
+        self._send_drive_command()
+        self._schedule_drive_repeat()
+
+    def _schedule_drive_repeat(self):
+        if self._drive_repeat_after_id is not None:
+            self.root.after_cancel(self._drive_repeat_after_id)
+            self._drive_repeat_after_id = None
+
+        deadlines = [deadline for deadline in self._drive_axis_deadline.values() if deadline is not None]
+        if not self._active_drive_inputs and not deadlines:
+            return
+
+        delay_ms = DRIVE_REPEAT_MS
+        if not self._active_drive_inputs:
+            remaining_ms = max(1, int((min(deadlines) - time.monotonic()) * 1000.0 + 0.999))
+            delay_ms = min(delay_ms, remaining_ms)
+        self._drive_repeat_after_id = self.root.after(delay_ms, self._repeat_drive_command)
+
+    def _release_drive_input(self, token):
+        if token not in self._active_drive_inputs:
+            return
+        del self._active_drive_inputs[token]
+        self._send_drive_command()
+        self._schedule_drive_repeat()
+
+    def _dispatch_drive(self):
+        now_ms = time.time() * 1000
+        if (now_ms - self._last_drive_tx_ms) >= 30:
+            self._last_drive_tx_ms = now_ms
+            self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+
+    def cmd_stop(self):
+        self._cancel_drive_timers()
+        self._active_drive_inputs.clear()
+        self._reset_drive_axis_state()
+        self.drive_cmd = 0
+        self.steer_cmd = 0
+        self._last_drive_tx_ms = 0
+        self.send_serial_cmd("DRIVE 0 0")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PANEL 5: CONSOLE LOG / TERMINAL
     # ──────────────────────────────────────────────────────────────────────────
     def _build_console_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 💻 Terminal Console ",
-            font=("Segoe UI", 9, "bold"),
+            text=" 🖥 Console & Lệnh Trực Tiếp ",
+            font=("Segoe UI", 10, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
             bd=1,
@@ -835,444 +1484,171 @@ class GroundStationApp:
         )
         card.pack(fill=tk.BOTH, expand=True)
 
-        log_frame = tk.Frame(card, bg=THEME["console_bg"])
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
-
-        scrollbar = tk.Scrollbar(log_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
         self.txt_console = tk.Text(
-            log_frame,
-            height=6,
+            card,
             bg=THEME["console_bg"],
-            fg="#a6e3a1",
-            insertbackground="#ffffff",
-            font=("Consolas", 8),
-            yscrollcommand=scrollbar.set,
+            fg=THEME["text"],
+            font=("Consolas", 9),
+            height=7,
+            wrap=tk.WORD,
             bd=0,
-            relief=tk.FLAT
+            state=tk.DISABLED
         )
         self.txt_console.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.txt_console.yview)
 
-        self.txt_console.tag_config("tx", foreground="#89b4fa")
-        self.txt_console.tag_config("rx", foreground="#a6e3a1")
-        self.txt_console.tag_config("err", foreground="#f38ba8")
-        self.txt_console.tag_config("warn", foreground="#fab387")
-        self.txt_console.tag_config("info", foreground="#cdd6f4")
+        self.txt_console.tag_config("TX", foreground=THEME["primary"])
+        self.txt_console.tag_config("RX", foreground=THEME["success"])
+        self.txt_console.tag_config("WARN", foreground=THEME["warning"])
+        self.txt_console.tag_config("ERROR", foreground=THEME["danger"])
+        self.txt_console.tag_config("INFO", foreground=THEME["subtext"])
+        self.txt_console.tag_config("SUCCESS", foreground=THEME["success"])
 
-        in_frame = tk.Frame(card, bg=THEME["card"])
-        in_frame.pack(fill=tk.X)
+        input_frame = tk.Frame(card, bg=THEME["card"], pady=4)
+        input_frame.pack(fill=tk.X)
 
-        self.ent_cmd = tk.Entry(in_frame, font=("Consolas", 8), bg=THEME["card_alt"], fg=THEME["text"], insertbackground=THEME["text"], bd=1, relief=tk.SOLID)
-        self.ent_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=2)
-        self.ent_cmd.bind("<Return>", lambda e: self._send_manual_cmd())
-
-        btn_send = tk.Button(
-            in_frame, text="GỬI", font=("Segoe UI", 8, "bold"),
-            bg=THEME["primary"], fg="#11111b", relief=tk.FLAT, padx=8,
-            command=self._send_manual_cmd
+        self.entry_cmd = tk.Entry(
+            input_frame,
+            bg=THEME["card_alt"],
+            fg=THEME["text"],
+            font=("Consolas", 10),
+            insertbackground="#ffffff",
+            relief=tk.FLAT
         )
-        btn_send.pack(side=tk.LEFT, padx=(0, 2))
+        self.entry_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.entry_cmd.bind("<Return>", lambda e: self._send_manual_command())
 
-        btn_clear = tk.Button(
-            in_frame, text="XÓA", font=("Segoe UI", 8),
-            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=6,
-            command=self.clear_console
-        )
-        btn_clear.pack(side=tk.LEFT)
+        tk.Button(
+            input_frame, text="GỬI", font=("Segoe UI", 8, "bold"),
+            bg=THEME["primary"], fg="#11111b", relief=tk.FLAT, padx=10,
+            command=self._send_manual_command
+        ).pack(side=tk.LEFT, padx=2)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # STATUS BAR (THANH TRẠNG THÁI CUỐI TRANG)
-    # ──────────────────────────────────────────────────────────────────────────
+        tk.Button(
+            input_frame, text="XÓA", font=("Segoe UI", 8),
+            bg=THEME["card_alt"], fg=THEME["subtext"], relief=tk.FLAT, padx=8,
+            command=self._clear_console
+        ).pack(side=tk.LEFT, padx=2)
+
+    def _clear_console(self):
+        self.txt_console.config(state=tk.NORMAL)
+        self.txt_console.delete("1.0", tk.END)
+        self.txt_console.config(state=tk.DISABLED)
+
+    def _send_manual_command(self):
+        cmd = self.entry_cmd.get().strip()
+        if cmd:
+            self.send_serial_cmd(cmd)
+            self.entry_cmd.delete(0, tk.END)
+
+    def log_console(self, text, tag="INFO"):
+        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        line = f"[{ts}] {text}\n"
+        self.txt_console.config(state=tk.NORMAL)
+        self.txt_console.insert(tk.END, line, tag)
+        self.txt_console.see(tk.END)
+        self.txt_console.config(state=tk.DISABLED)
+
     def _build_status_bar(self):
-        sb = tk.Frame(self.root, bg=THEME["panel"], height=22, padx=10)
-        sb.pack(fill=tk.X, side=tk.BOTTOM)
+        status_bar = tk.Frame(self.root, bg=THEME["panel"], height=24, padx=12, pady=2)
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
-        self.lbl_sb_port = tk.Label(sb, text="Port: CHƯA KẾT NỐI", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["panel"])
-        self.lbl_sb_port.pack(side=tk.LEFT, padx=(0, 15))
+        tk.Label(
+            status_bar,
+            text="Hệ thống sẵn sàng | Lưu ý an toàn: Nhấc 2 bánh xe khỏi mặt đất khi thử nghiệm lần đầu!",
+            font=("Segoe UI", 9),
+            fg=THEME["subtext"],
+            bg=THEME["panel"]
+        ).pack(side=tk.LEFT)
 
-        self.lbl_sb_txrx = tk.Label(sb, text="TX: 0 | RX: 0", font=("Segoe UI", 8), fg=THEME["subtext"], bg=THEME["panel"])
-        self.lbl_sb_txrx.pack(side=tk.LEFT, padx=(0, 15))
-
-        self.lbl_sb_mode = tk.Label(sb, text="MediaPipe Gesture & ESP32-S3 FPV Stream Ready", font=("Segoe UI", 8), fg=THEME["accent"], bg=THEME["panel"])
-        self.lbl_sb_mode.pack(side=tk.RIGHT)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # XỬ LÝ PHÍM TẮT BÀN PHÍM
-    # ──────────────────────────────────────────────────────────────────────────
-    def _bind_keyboard_events(self):
-        self.root.bind("<Key>", self._on_key_press)
-        self.root.bind("<space>", lambda e: self.cmd_stop())
-
-    def _on_key_press(self, event):
-        if event.widget == self.ent_cmd or event.widget == self.cb_stream_url:
-            return
-
-        k = event.keysym.lower()
-        if k == 'w':
-            self.cmd_fwd()
-        elif k == 's':
-            self.cmd_bwd()
-        elif k == 'a':
-            self.cmd_left()
-        elif k == 'd':
-            self.cmd_right()
-        elif k == 'q':
-            self.cmd_fwd_left()
-        elif k == 'e':
-            self.cmd_fwd_right()
-        elif k == 'z':
-            self.cmd_bwd_left()
-        elif k == 'c':
-            self.cmd_bwd_right()
-        elif k == 'x':
-            self.cmd_arm()
-        elif k == 'v':
-            self.cmd_disarm()
-        elif k == 'escape':
-            self.cmd_estop()
+        self.lbl_packets_stat = tk.Label(
+            status_bar,
+            text="TX: 0 | RX: 0",
+            font=("Consolas", 9),
+            fg=THEME["accent"],
+            bg=THEME["panel"]
+        )
+        self.lbl_packets_stat.pack(side=tk.RIGHT)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # CÁC LỆNH ĐIỀU KHIỂN XE (8 HƯỚNG & HÀNH ĐỘNG)
-    # ──────────────────────────────────────────────────────────────────────────
-    def cmd_arm(self):
-        self.send_serial_command("ARM")
-        self.lbl_active_direction.config(text="LỆNH: 🟢 ARM XE")
-
-    def cmd_disarm(self):
-        self.drive_cmd = 0
-        self.steer_cmd = 0
-        self.send_serial_command("DISARM")
-        self.lbl_active_direction.config(text="LỆNH: 🟡 DISARM")
-
-    def cmd_estop(self):
-        self.drive_cmd = 0
-        self.steer_cmd = 0
-        self.send_serial_command("ESTOP")
-        self.lbl_active_direction.config(text="LỆNH: 🛑 DỪNG KHẨN")
-
-    def cmd_stop(self):
-        self.drive_cmd = 0
-        self.steer_cmd = 0
-        self.send_serial_command(" ")
-        self.lbl_active_direction.config(text="HƯỚNG: TĨNH (STOP)")
-
-    def cmd_fwd(self):
-        step = self.slider_speed_step.get()
-        self.drive_cmd = step
-        self.steer_cmd = 0
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ▲ TIẾN THẲNG")
-
-    def cmd_bwd(self):
-        step = self.slider_speed_step.get()
-        self.drive_cmd = -step
-        self.steer_cmd = 0
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ▼ LÙI THẲNG")
-
-    def cmd_left(self):
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = 0
-        self.steer_cmd = -steer
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ◄ QUAY TRÁI")
-
-    def cmd_right(self):
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = 0
-        self.steer_cmd = steer
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ► QUAY PHẢI")
-
-    def cmd_fwd_left(self):
-        step = self.slider_speed_step.get()
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = int(step * 0.85)
-        self.steer_cmd = -int(steer * 0.85)
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ↖ TIẾN - CHÉO TRÁI")
-
-    def cmd_fwd_right(self):
-        step = self.slider_speed_step.get()
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = int(step * 0.85)
-        self.steer_cmd = int(steer * 0.85)
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ↗ TIẾN - CHÉO PHẢI")
-
-    def cmd_bwd_left(self):
-        step = self.slider_speed_step.get()
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = -int(step * 0.85)
-        self.steer_cmd = -int(steer * 0.85)
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ↙ LÙI - CHÉO TRÁI")
-
-    def cmd_bwd_right(self):
-        step = self.slider_speed_step.get()
-        steer = self.slider_steer_step.get()
-        self.drive_cmd = -int(step * 0.85)
-        self.steer_cmd = int(steer * 0.85)
-        self.send_serial_command(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-        self.lbl_active_direction.config(text="HƯỚNG: ↘ LÙI - CHÉO PHẢI")
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # GIAO TIẾP SERIAL VÀ XỬ LÝ TELEMETRY
-    # ──────────────────────────────────────────────────────────────────────────
-    def refresh_ports(self):
-        if SerialClient is None:
-            return
-        ports = list_com_ports()
-        self.cb_ports['values'] = ports
-        if ports and not self.cb_ports.get():
-            best = find_best_esp32_port()
-            self.cb_ports.set(best if best else ports[0])
-
-    def _auto_connect_dongle(self):
-        if not self.serial_running and self.auto_reconnect_var.get() and SerialClient:
-            best = find_best_esp32_port()
-            if best:
-                self.cb_ports.set(best)
-                self.toggle_serial_connection()
-
-    def toggle_serial_connection(self):
-        if self.serial_running:
-            self._disconnect_serial()
-        else:
-            port = self.cb_ports.get().strip()
-            if not port:
-                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một cổng COM hợp lệ!")
-                return
-            self._connect_serial(port)
-
-    def _connect_serial(self, port):
-        if SerialClient is None:
-            messagebox.showerror("Lỗi", "Không tìm thấy driver serial (serial_driver.py)!")
-            return
-
-        try:
-            self.serial_client = SerialClient(port=port, baudrate=115200, timeout=0.1)
-            self.serial_client.open()
-            self.serial_running = True
-            self.last_connected_port = port
-
-            self.btn_connect.config(text="❌ NGẮT KẾT NỐI", bg=THEME["danger"])
-            self.lbl_dongle_status.config(text=f"● DONGLE: {port} (115200)", fg=THEME["success"])
-            self.lbl_sb_port.config(text=f"Port: {port} (Connected)")
-
-            self._log_console(f"[HỆ THỐNG] Đã mở cổng {port} @ 115200 baud.", "info")
-
-            self.serial_thread = threading.Thread(target=self._serial_reader_thread, daemon=True)
-            self.serial_thread.start()
-
-            self.root.after(200, lambda: self.send_serial_command("PING"))
-
-        except Exception as e:
-            self.serial_running = False
-            self.serial_client = None
-            self._log_console(f"[LỖI] Không thể mở cổng {port}: {e}", "err")
-
-    def _disconnect_serial(self):
-        self.serial_running = False
-        if self.serial_client:
-            try:
-                self.serial_client.close()
-            except Exception:
-                pass
-            self.serial_client = None
-
-        self.btn_connect.config(text="⚡ KẾT NỐI", bg=THEME["primary"])
-        self.lbl_dongle_status.config(text="● DONGLE: ĐÃ NGẮT", fg=THEME["danger"])
-        self.lbl_sb_port.config(text="Port: Disconnected")
-        self.lbl_nrf_link.config(text="SÓNG NRF: ĐÃ NGẮT", fg=THEME["danger"])
-        self._log_console("[HỆ THỐNG] Đã đóng kết nối Serial.", "info")
-
-    def send_serial_command(self, cmd):
-        if not self.serial_running or not self.serial_client:
-            return
-        try:
-            full_cmd = cmd.strip() + "\n"
-            self.serial_client.write(full_cmd.encode('utf-8', errors='ignore'))
-            self.tx_count += 1
-            self._log_console(f"TX >> {cmd.strip()}", "tx")
-        except Exception as e:
-            self._log_console(f"[LỖI TX] {e}", "err")
-
-    def _send_manual_cmd(self):
-        text = self.ent_cmd.get().strip()
-        if text:
-            self.send_serial_command(text)
-            self.ent_cmd.delete(0, tk.END)
-
-    def _serial_reader_thread(self):
-        while self.serial_running and self.serial_client:
-            try:
-                line = self.serial_client.readline()
-                if line:
-                    line_str = line.decode('utf-8', errors='ignore').strip()
-                    if line_str:
-                        self.rx_count += 1
-                        self.root.after(0, self._process_rx_line, line_str)
-                else:
-                    time.sleep(0.005)
-            except Exception as e:
-                if self.serial_running:
-                    self.root.after(0, self._log_console, f"[LỖI RX] {e}", "err")
-                break
-
-        if self.serial_running:
-            self.root.after(0, self._disconnect_serial)
-
-    def _process_rx_line(self, line):
-        tag = "rx"
-        if "LỖI" in line or "ERR" in line:
-            tag = "err"
-        elif "CHỜ" in line or "WARN" in line:
-            tag = "warn"
-        elif "SÓNG TỐT" in line or "KẾT NỐI TỐT" in line:
-            tag = "rx"
-        self._log_console(line, tag)
-
-        if "SÓNG TỐT" in line or "KẾT NỐI TỐT" in line:
-            self.nrf_link_ok = True
-            self.lbl_nrf_link.config(text="SÓNG NRF: 🟢 ĐÃ KẾT NỐI (AUTO-ACK)", fg=THEME["success"])
-        elif "CHỜ TÍN HIỆU XE" in line or "Đang phát sóng tìm xe" in line:
-            self.nrf_link_ok = False
-            self.lbl_nrf_link.config(text="SÓNG NRF: 🟡 CHỜ XE BẬT NGUỒN", fg=THEME["warning"])
-        elif "LỖI NRF24" in line or "LỖI PHẦN CỨNG" in line:
-            self.nrf_link_ok = False
-            self.lbl_nrf_link.config(text="SÓNG NRF: 🔴 LỖI PHẦN CỨNG", fg=THEME["danger"])
-
-        if "pitch" in line.lower() or "vbat" in line.lower():
-            m_pitch = re.search(r'"?pitch"?\s*:\s*([-+]?\d*\.?\d+)', line, re.I)
-            if m_pitch:
-                self.pitch_deg = float(m_pitch.group(1))
-
-            m_rate = re.search(r'"?rate"?\s*:\s*([-+]?\d*\.?\d+)', line, re.I)
-            if m_rate:
-                self.gyro_rate = float(m_rate.group(1))
-
-            m_vbat = re.search(r'"?vbat"?\s*:\s*([-+]?\d*\.?\d+)', line, re.I)
-            if m_vbat:
-                self.bat_v = float(m_vbat.group(1))
-
-            m_state = re.search(r'"?state"?\s*:\s*"([A-Za-z0-9_]+)"', line, re.I)
-            if m_state:
-                self.robot_state_str = m_state.group(1).upper()
-
-            m_dist = re.search(r'"?dist"?\s*:\s*(\d+)', line, re.I)
-            if m_dist:
-                self.dist_cm = int(m_dist.group(1))
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # VÒNG LẶP CẬP NHẬT GIAO DIỆN & RENDER VIDEO (30 FPS)
+    # VÒNG LẶP CẬP NHẬT GIAO DIỆN CHÍNH (~30 FPS)
     # ──────────────────────────────────────────────────────────────────────────
     def _ui_periodic_update(self):
-        # 1. Cập nhật đồng hồ hệ thống
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.lbl_system_clock.config(text=now_str)
+        self.lbl_packets_stat.config(text=f"TX: {self.tx_count} | RX: {self.rx_count}")
+        # Tự động kết nối lại cổng COM nếu bị rút cáp và cắm lại
+        if not self.serial_running and self.auto_reconnect_var.get() and self.last_connected_port:
+            now_ms = time.time() * 1000
+            if (now_ms - self._last_reconnect_attempt_ms) >= 2000:
+                self._last_reconnect_attempt_ms = now_ms
+                if self.last_connected_port in list_com_ports():
+                    self.auto_reconnecting = True
+                    self.connect_serial(self.last_connected_port)
+                    self.auto_reconnecting = False
 
-        # 2. Cập nhật Telemetry
-        self.lbl_pitch_val.config(text=f"{self.pitch_deg:+.2f}°")
-        self.lbl_gyro_val.config(text=f"{self.gyro_rate:+.1f} °/s")
-        if self.bat_v > 0.1:
-            self.lbl_bat_val.config(text=f"{self.bat_v:.2f} V")
-        if self.dist_cm > 0:
-            self.lbl_dist_val.config(text=f"{self.dist_cm} cm")
-
-        self.lbl_cmd_val.config(text=f"{self.drive_cmd} / {self.steer_cmd}")
-
-        if self.robot_state_str == "ARMED":
-            self.lbl_robot_state.config(text="ARMED (CÂN BẰNG)", bg=THEME["success"], fg="#11111b")
-        elif self.robot_state_str == "FAULT":
-            self.lbl_robot_state.config(text="FAULT (NGÃ XE)", bg=THEME["danger"], fg="#ffffff")
-        else:
-            self.lbl_robot_state.config(text=self.robot_state_str, bg=THEME["warning"], fg="#11111b")
-
-        self._draw_tilt_gauge()
-        self.lbl_sb_txrx.config(text=f"TX: {self.tx_count} | RX: {self.rx_count}")
-
-        # 3. Render khung hình Video FPV ESP32-CAM và Xử lý AI Vision
+        # Cập nhật khung hình FPV chính (ESP32-S3 CAM)
         if self.current_frame is not None:
             try:
-                frame_to_show = self.current_frame.copy()
-                frame_to_show = self._process_ai_vision(frame_to_show)
-
                 h_can = self.video_canvas.winfo_height()
                 w_can = self.video_canvas.winfo_width()
-
                 if w_can > 50 and h_can > 50:
-                    orig_h, orig_w = frame_to_show.shape[:2]
+                    orig_h, orig_w = self.current_frame.shape[:2]
                     scale = min(w_can / orig_w, h_can / orig_h)
                     new_w = max(1, int(orig_w * scale))
                     new_h = max(1, int(orig_h * scale))
 
-                    resized = cv2.resize(frame_to_show, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    resized = cv2.resize(self.current_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                     rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(rgb_frame)
-                    self.photo_img = ImageTk.PhotoImage(image=pil_img)
+                    self.photo_img = ImageTk.PhotoImage(image=Image.fromarray(rgb_frame))
 
                     self.video_canvas.delete("all")
-                    pos_x = (w_can - new_w) // 2
-                    pos_y = (h_can - new_h) // 2
-                    self.video_canvas.create_image(pos_x, pos_y, anchor=tk.NW, image=self.photo_img)
-
-                    self.lbl_fps.config(text=f"FPS: {self.fps_display:.1f} | Phân giải: {orig_w}x{orig_h}")
+                    self.video_canvas.create_image(
+                        (w_can - new_w) // 2,
+                        (h_can - new_h) // 2,
+                        anchor=tk.NW,
+                        image=self.photo_img
+                    )
+                    self.lbl_fps.config(text=f"FPS: {self.fps_display:.1f} | Kích thước: {orig_w}x{orig_h}")
             except Exception:
                 pass
 
-        # 4. Render khung hình Mini Preview Nhận diện Cử Chỉ Bàn Tay (MediaPipe)
+        # Cập nhật khung hình mini Webcam lái tay (nếu đang bật)
         if self.hand_mode_enabled and self.hand_frame is not None:
             try:
                 resized_hand = cv2.resize(self.hand_frame, (148, 110), interpolation=cv2.INTER_LINEAR)
                 rgb_hand = cv2.cvtColor(resized_hand, cv2.COLOR_BGR2RGB)
-                pil_hand = Image.fromarray(rgb_hand)
-                self.hand_photo_img = ImageTk.PhotoImage(image=pil_hand)
-
+                self.hand_photo_img = ImageTk.PhotoImage(image=Image.fromarray(rgb_hand))
                 self.hand_canvas.delete("all")
                 self.hand_canvas.create_image(0, 0, anchor=tk.NW, image=self.hand_photo_img)
+                self._hand_preview_error_reported = False
             except Exception:
-                pass
+                if not self._hand_preview_error_reported:
+                    traceback.print_exc()
+                    self.log_console("[Webcam Lỗi] Không hiển thị được khung hình webcam.", "ERROR")
+                    self._hand_preview_error_reported = True
 
-        # Lặp lại sau 33 ms (~30 FPS)
-        self.root.after(33, self._ui_periodic_update)
-
-    def _draw_tilt_gauge(self):
-        w = self.canvas_tilt.winfo_width()
-        h = self.canvas_tilt.winfo_height()
-        if w < 10:
-            return
-
-        self.canvas_tilt.delete("all")
-        cx = w // 2
-
-        self.canvas_tilt.create_line(cx, 0, cx, h, fill="#6c7086", width=2)
-        clamped_pitch = max(-15.0, min(15.0, self.pitch_deg))
-        indicator_x = cx + int((clamped_pitch / 15.0) * (w / 2 - 4))
-
-        color = THEME["success"] if abs(self.pitch_deg) < 4.0 else (THEME["warning"] if abs(self.pitch_deg) < 12.0 else THEME["danger"])
-        self.canvas_tilt.create_rectangle(min(cx, indicator_x), 2, max(cx, indicator_x), h - 2, fill=color, outline="")
-
-    def _log_console(self, msg, tag="info"):
-        self.txt_console.insert(tk.END, msg + "\n", tag)
-        self.txt_console.see(tk.END)
-
-    def clear_console(self):
-        self.txt_console.delete("1.0", tk.END)
+        self.root.after(16, self._ui_periodic_update)
 
     def on_closing(self):
         if messagebox.askokcancel("Thoát", "Bạn có chắc muốn đóng Ground Control Station?"):
+            if self.gamepad_connected:
+                self.cmd_stop()
+                self.cmd_disarm()
+            self.gamepad_enabled = False
+            if self._gamepad_poll_after_id is not None:
+                self.root.after_cancel(self._gamepad_poll_after_id)
+                self._gamepad_poll_after_id = None
+            self._close_gamepad(shutdown=True)
             self.stop_hand_mode()
             self.stop_video_stream()
-            self._disconnect_serial()
+            self.disconnect_serial()
             self.root.destroy()
 
 
 def main():
     root = tk.Tk()
     app = GroundStationApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
 
 

@@ -25,15 +25,19 @@
    - Điện áp Pin 4S (V): giám sát mức pin an toàn (14.8V định danh).
 
 4. **Bảng Điều Khiển & Phím Tắt Nhanh**:
+   - Nút **ADAS: ON (An toàn)** / **ADAS: OFF (Chế độ Đua)** hoặc phím **F2** bật/tắt tránh vật cản và phanh mép bàn; trạng thái được gửi khi kết nối và mỗi lần đổi. Tắt ADAS sẽ bỏ qua các phản ứng vật cản nhưng không vô hiệu hóa tự DISARM khi xe ngã.
    - **X** / Nút **ARM XE**: Kích hoạt cân bằng (chỉ bật khi xe dựng thẳng).
    - **Z** / Nút **DISARM**: Ngắt động cơ an toàn.
    - **E** / Nút **ESTOP**: Dừng khẩn cấp ngay lập tức.
-   - **W**: Tiến (+150 tốc độ)
-   - **S**: Lùi (-150 tốc độ)
-   - **A**: Rẽ trái (-200 góc lái)
-   - **D**: Rẽ phải (+200 góc lái)
-   - **Space** / **R**: Phanh dừng tại chỗ (về 0).
-   - Thanh trượt tùy chỉnh bước tốc độ và độ nhạy rẽ.
+   - **W/S/A/D** và các nút hướng hoạt động theo kiểu nhấn-giữ; mức lệnh lấy từ các thanh trượt tốc độ và độ nhạy rẽ.
+   - Lệnh được gia hạn mỗi 100 ms khi giữ; nhấn nhanh Tiến/Lùi giữ xung tối thiểu 450 ms, còn Xoay trái/phải giữ xung tối thiểu 220 ms.
+   - **Space** / **R** hoặc nút **STOP**: dừng tức thì (về 0).
+   - Thanh trượt tùy chỉnh mức tốc độ tiến/lùi và độ nhạy rẽ.
+   - Tay cầm USB generic: bật **TAY CẦM USB** trong GCS; joystick trái (trục Y) điều khiển tiến/lùi, joystick phải (trục X) điều khiển rẽ. Có deadzone 12%; tốc độ và độ nhạy lấy theo hai thanh trượt.
+   - Nút 1 (button index 0) toggle ARM/DISARM theo trạng thái telemetry; chỉ ARM khi xe báo `DISARMED`. Nút 2 STOP, nút 3 ESTOP, nút 4 chưa gán.
+   - Lệnh DRIVE được gửi định kỳ khi tay cầm hoạt động. Khi rút tay cầm mà Serial GCS vẫn nối, GCS gửi `DRIVE 0 0`, giữ trạng thái ARM hiện có và cho phép chuyển sang webcam/phím; nếu Serial GCS mất thì không thể gửi lệnh. Chuyển động từ joystick bị khóa khi trạng thái xe chưa là `ARMED`.
+   - Bật Webcam lái tay khi đang bật tay cầm sẽ chuyển nguồn điều khiển: dừng lệnh joystick và tắt tay cầm trước khi mở webcam.
+   - Trên Windows, webcam thử backend DirectShow trước rồi fallback sang backend OpenCV mặc định; lỗi mở camera/đọc frame được in traceback ở terminal và báo trong GCS.
 
 5. **Terminal / Console**:
    - Hiển thị lịch sử gói tin TX/RX.
@@ -42,6 +46,11 @@
 ---
 
 ## 2. Hướng Dẫn Khởi Động
+
+Cài các thư viện Python từ thư mục `App_python` trước khi chạy:
+```bash
+python -m pip install -r requirements.txt
+```
 
 ### Cách 1: Chạy bằng file `.bat` (Tiện nhất trên Windows)
 - Nhấp đúp chuột vào file: `run_app.bat`

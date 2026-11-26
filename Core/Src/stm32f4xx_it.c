@@ -58,7 +58,7 @@
 /* External variables --------------------------------------------------------*/
 
 /* USER CODE BEGIN EV */
-extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
+
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -244,13 +244,5 @@ extern UART_HandleTypeDef huart1;
 void USART1_IRQHandler(void)
 {
   HAL_UART_IRQHandler(&huart1);
-}
-
-/**
-  * @brief This function handles USB On The Go FS global interrupt.
-  */
-void OTG_FS_IRQHandler(void)
-{
-  HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
 }
 /* USER CODE END 1 */

@@ -10,17 +10,20 @@ obj/
 *.d
 *.o
 
-# Python cache
+# Python cache & snapshots
 __pycache__/
 *.py[cod]
 *$py.class
 snapshots/
+App_python/snapshots/
 
 # IDE & Editor files
 .vscode/
 .settings/
+.clangd
 .clangd/
 mx.scratch
+BalancingWii-master/
 
 # OS generated files
 Thumbs.db

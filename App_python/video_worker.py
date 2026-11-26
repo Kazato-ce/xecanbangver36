@@ -1,11 +1,13 @@
 """
-Video Stream Grabber for ESP32-CAM and other HTTP / MJPEG / RTSP streams.
-Decoupled and standalone: Takes any URL, grabs frames via OpenCV or HTTP, and passes to GUI.
+Video Stream Grabber for ESP32-S3 CAM FPV and HTTP / MJPEG streams.
 """
 
-import time
 import threading
+import time
+import os
+import traceback
 import urllib.request
+
 import cv2
 import numpy as np
 
@@ -14,8 +16,8 @@ class VideoStreamWorker(threading.Thread):
     def __init__(self, source_url, on_frame, on_status):
         super().__init__(daemon=True)
         self.source_url = source_url.strip()
-        self.on_frame = on_frame          # callback(cv2_bgr_frame, fps)
-        self.on_status = on_status        # callback(status_str, is_connected)
+        self.on_frame = on_frame
+        self.on_status = on_status
         self.running = False
         self._stop_event = threading.Event()
 
@@ -25,99 +27,157 @@ class VideoStreamWorker(threading.Thread):
 
     def run(self):
         self.running = True
-        self.on_status(f"Đang kết nối: {self.source_url} ...", False)
-
-        # Kiểm tra nếu là webcam local (e.g. '0', '1')
-        if self.source_url.isdigit():
-            self._run_opencv_capture(int(self.source_url))
-            return
-
-        # Kiểm tra nếu là URL ảnh tĩnh (snapshot) hay stream MJPEG
-        is_snapshot = self.source_url.lower().endswith(('.jpg', '.jpeg', '.png')) or 'capture' in self.source_url.lower()
-
-        if is_snapshot:
-            self._run_snapshot_loop()
-        else:
-            self._run_opencv_capture(self.source_url)
-
-    def _run_opencv_capture(self, source):
-        cap = None
+        self.on_status(f"Đang kết nối FPV: {self.source_url} ...", False)
         try:
-            cap = cv2.VideoCapture(source)
-            if not cap.isOpened():
-                # Thử thêm flag timeout hoặc ffmpeg
-                self.on_status(f"Không thể mở stream từ: {source}", False)
-                return
-
-            self.on_status("Đã kết nối stream thành công!", True)
-            frame_count = 0
-            start_time = time.time()
-            current_fps = 0.0
-
-            while not self._stop_event.is_set():
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    self.on_status("Mất tín hiệu video... đang thử lại", False)
-                    time.sleep(0.5)
-                    continue
-
-                frame_count += 1
-                elapsed = time.time() - start_time
-                if elapsed >= 1.0:
-                    current_fps = frame_count / elapsed
-                    frame_count = 0
-                    start_time = time.time()
-
-                try:
-                    self.on_frame(frame, current_fps)
-                except Exception:
-                    pass
-
-                # Điều chỉnh tốc độ khung hình nhẹ nhàng để giảm tải CPU
-                time.sleep(0.01)
-
-        except Exception as e:
-            self.on_status(f"Lỗi stream: {e}", False)
+            if self.source_url.isdigit():
+                self._run_webcam_capture(int(self.source_url))
+            elif self._is_snapshot_url():
+                self._run_snapshot_loop()
+            else:
+                self._run_mjpeg_stream()
         finally:
-            if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
-            self.on_status("Đã dừng stream video.", False)
+            self.running = False
 
-    def _run_snapshot_loop(self):
-        """Dùng cho ESP32-CAM ở chế độ chụp ảnh snapshot định kỳ (URL /capture)"""
-        self.on_status("Đã kết nối chế độ Snapshot HTTP!", True)
+    def _is_snapshot_url(self):
+        url = self.source_url.lower()
+        return url.endswith((".jpg", ".jpeg", ".png")) or "capture" in url
+
+    @staticmethod
+    def _open_camera(camera_index):
+        if os.name == "nt":
+            cap = None
+            try:
+                cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+                if cap.isOpened():
+                    return cap
+            except Exception:
+                traceback.print_exc()
+            if cap is not None:
+                cap.release()
+
+        return cv2.VideoCapture(camera_index)
+
+    def _run_webcam_capture(self, camera_index):
+        while not self._stop_event.is_set():
+            cap = self._open_camera(camera_index)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not cap.isOpened():
+                cap.release()
+                self.on_status("Chưa mở được webcam... thử lại sau 1 giây", False)
+                self._stop_event.wait(1.0)
+                continue
+
+            self.on_status("Đã kết nối webcam!", True)
+            frame_count = 0
+            start_time = time.monotonic()
+            current_fps = 0.0
+            try:
+                while not self._stop_event.is_set():
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
+
+                    frame_count += 1
+                    elapsed = time.monotonic() - start_time
+                    if elapsed >= 1.0:
+                        current_fps = frame_count / elapsed
+                        frame_count = 0
+                        start_time = time.monotonic()
+                    self.on_frame(frame, current_fps)
+            finally:
+                cap.release()
+
+            if not self._stop_event.is_set():
+                self.on_status("Mất webcam... đang tự nối lại", False)
+                self._stop_event.wait(1.0)
+
+    def _run_mjpeg_stream(self):
         frame_count = 0
-        start_time = time.time()
+        start_time = time.monotonic()
         current_fps = 0.0
 
         while not self._stop_event.is_set():
-            t0 = time.time()
+            buf = bytearray()
             try:
                 req = urllib.request.Request(
                     self.source_url,
-                    headers={'User-Agent': 'Mozilla/5.0'}
+                    headers={"User-Agent": "Mozilla/5.0"},
                 )
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
-                    img_bytes = resp.read()
+                with urllib.request.urlopen(req, timeout=2.0) as response:
+                    self.on_status("Đã kết nối FPV stream!", True)
+                    while not self._stop_event.is_set():
+                        chunk = response.read(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+
+                        if len(buf) > 300_000:
+                            buf.clear()
+                            continue
+
+                        end_idx = buf.rfind(b"\xff\xd9")
+                        if end_idx < 0:
+                            continue
+
+                        start_idx = buf.rfind(b"\xff\xd8", 0, end_idx)
+                        if start_idx < 0:
+                            del buf[:end_idx + 2]
+                            continue
+
+                        jpeg = bytes(buf[start_idx:end_idx + 2])
+                        del buf[:end_idx + 2]
+                        encoded = np.frombuffer(jpeg, dtype=np.uint8)
+                        frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                        if frame is None:
+                            continue
+
+                        frame_count += 1
+                        elapsed = time.monotonic() - start_time
+                        if elapsed >= 1.0:
+                            current_fps = frame_count / elapsed
+                            frame_count = 0
+                            start_time = time.monotonic()
+                        self.on_frame(frame, current_fps)
+
+                if not self._stop_event.is_set():
+                    self.on_status("Mất tín hiệu FPV... đang tự nối lại", False)
+                    self._stop_event.wait(1.0)
+            except Exception as exc:
+                if not self._stop_event.is_set():
+                    self.on_status(f"Lỗi stream FPV: {exc} ... thử lại sau 1 giây", False)
+                    self._stop_event.wait(1.0)
+
+        self.on_status("Đã dừng stream FPV.", False)
+
+    def _run_snapshot_loop(self):
+        self.on_status("Đã kết nối chế độ Snapshot HTTP!", True)
+        frame_count = 0
+        start_time = time.monotonic()
+        current_fps = 0.0
+
+        while not self._stop_event.is_set():
+            started_at = time.monotonic()
+            try:
+                req = urllib.request.Request(
+                    self.source_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                with urllib.request.urlopen(req, timeout=2.0) as response:
+                    img_bytes = response.read()
                 img_arr = np.frombuffer(img_bytes, dtype=np.uint8)
                 frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
 
                 if frame is not None:
                     frame_count += 1
-                    elapsed = time.time() - start_time
+                    elapsed = time.monotonic() - start_time
                     if elapsed >= 1.0:
                         current_fps = frame_count / elapsed
                         frame_count = 0
-                        start_time = time.time()
-
+                        start_time = time.monotonic()
                     self.on_frame(frame, current_fps)
-            except Exception:
-                time.sleep(0.2)
+            except Exception as exc:
+                self.on_status(f"Lỗi snapshot: {exc}", False)
 
-            sleep_time = max(0.02, 0.06 - (time.time() - t0))
-            time.sleep(sleep_time)
+            self._stop_event.wait(max(0.02, 0.06 - (time.monotonic() - started_at)))
 
         self.on_status("Đã dừng snapshot.", False)

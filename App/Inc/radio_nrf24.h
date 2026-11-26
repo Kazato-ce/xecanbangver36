@@ -16,6 +16,7 @@ uint16_t radio_get_last_seq(void);
 uint32_t radio_get_last_packet_age_ms(void);
 void     radio_get_raw_commands(int16_t *drive_cmd, int16_t *steer_cmd);
 uint8_t  radio_get_last_status(void);
+bool     radio_get_adas_enabled(void);
 
 void radio_get_commands(float *drive_norm, float *steer_norm, bool *arm_req, bool *disarm_req, bool *estop_req);
 

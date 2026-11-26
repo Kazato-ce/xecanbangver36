@@ -157,12 +157,12 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
     /* 4. Vòng ngoài PI Vận Tốc & Tạo Góc Nghiêng Di Chuyển (Drive Pitch Tilt):
      * Xe 2 bánh tự cân bằng muốn tiến/lùi phải nghiêng người theo hướng đó.
      * s_cmd_drive_filtered (-1.0 .. +1.0) chủ động tạo góc nghiêng drive_tilt để xe lướt đi */
-    float drive_tilt = s_cmd_drive_filtered * 5.0f;
+    float drive_tilt = s_cmd_drive_filtered * 7.5f;
 
     float speed_err = target_speed - s_actual_averaged_speed - (s_position_error * s_kp_pos);
 
     s_speed_error_i += speed_err * dt_s;
-    s_speed_error_i = clampf(s_speed_error_i, -8000.0f, 8000.0f);
+    s_speed_error_i = clampf(s_speed_error_i, -100000.0f, 100000.0f);
 
     float target_pitch = s_target_offset_deg
                        + drive_tilt
@@ -207,9 +207,7 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
         dyn_k = 0.0f;
     }
 
-    /* Trộn thành phần ga đẩy dứt khoát khi có lệnh tiến/lùi */
-    float drive_throttle = s_cmd_drive_filtered * (float)STEP_CRUISE_MAX_HZ * 0.35f;
-    float output_speed = (s_speed * dyn_k) + drive_throttle;
+    float output_speed = s_speed * dyn_k;
 
     /* 7. Bộ trộn rẽ thích ứng 8 hướng (Adaptive 8-way Steering Mixer):
      * - Khi xe đứng yên hoặc tốc độ thấp: lực quay tối đa để quay tại chỗ nhạy bén
@@ -231,8 +229,8 @@ void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float
     s_out_right_steps = clampf(s_out_right_steps, -STEP_FREQ_MAX_HZ, STEP_FREQ_MAX_HZ);
 
     /* Bộ lọc làm mịn tốc độ đầu ra (Output smoothing filter - triệt tiêu tiếng ồn & rít) */
-    s_out_left_filtered  = s_out_left_filtered  * 0.70f + s_out_left_steps  * 0.30f;
-    s_out_right_filtered = s_out_right_filtered * 0.70f + s_out_right_steps * 0.30f;
+    s_out_left_filtered  = s_out_left_filtered  * 0.35f + s_out_left_steps  * 0.65f;
+    s_out_right_filtered = s_out_right_filtered * 0.35f + s_out_right_steps * 0.65f;
 }
 
 void balance_get_motor_speeds(float *left_steps_s, float *right_steps_s)

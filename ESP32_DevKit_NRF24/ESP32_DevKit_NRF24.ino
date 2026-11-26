@@ -17,13 +17,13 @@
  *     MOSI   ----->  GPIO 23
  *     MISO   ----->  GPIO 19
  *
- * Sơ đồ đấu nối Cần gạt Joystick 2 trục (34, 35, 32):
- *   Joystick Module  ESP32 DevKit V1
+ * Sơ đồ đấu nối Cần gạt Joystick 2 trục (Analog PS2 Joystick Module):
+ *   Joystick        ESP32 DevKit V1
  *     VCC    ----->  3.3V (Bắt buộc dùng 3.3V để điện áp ADC không vượt ngưỡng)
  *     GND    ----->  GND
  *     VRX    ----->  GPIO 34 (Trục Tiến / Lùi - Input Only, ADC1_CH6)
  *     VRY    ----->  GPIO 35 (Trục Bẻ Lái Trái/Phải - Input Only, ADC1_CH7)
- *     SW     ----->  GPIO 32 (Nút bấm ấn trục xuống: Ấn ngắn ARM/DISARM | Giữ >1s ESTOP)
+ *     SW     ----->  GPIO 32 (Nút bấm ấn trục xuống: ARM / DISARM / ESTOP)
  */
 
 #include <SPI.h>
@@ -31,7 +31,7 @@
 #include "protocol.h"
 
 // ──────────────────────────────────────────────
-// Cấu hình chân phần cứng NRF24L01 & Joystick theo từng loại chip ESP32
+// Cấu hình chân phần cứng NRF24L01 theo từng loại chip ESP32
 // ──────────────────────────────────────────────
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ESP32S3)
   #define PIN_CE                  9
@@ -40,9 +40,9 @@
   #define PIN_SCK                 12
   #define PIN_MISO                13
   #define PIN_MOSI                11
-  #define PIN_JOY_VRX             1     // ADC1_CH0
-  #define PIN_JOY_VRY             2     // ADC1_CH1
-  #define PIN_JOY_SW              4     // Nút nhấn
+  #define PIN_JOY_VRX             34     // ADC1_CH0
+  #define PIN_JOY_VRY             35     // ADC1_CH1
+  #define PIN_JOY_SW              32     // Nút nhấn
 #elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV) || defined(ESP32C3)
   #define PIN_CE                  4
   #define PIN_CSN                 5
@@ -61,8 +61,8 @@
   #define PIN_SCK                 18
   #define PIN_MISO                19
   #define PIN_MOSI                23
-  #define PIN_JOY_VRX             34    // Trục Tiến / Lùi (VRX nối GPIO 34, ADC1_CH6)
-  #define PIN_JOY_VRY             35    // Trục Bẻ Lái Trái / Phải (VRY nối GPIO 35, ADC1_CH7)
+  #define PIN_JOY_VRX             34    // Trục Tiến / Lùi (VRX nối GPIO 34)
+  #define PIN_JOY_VRY             35    // Trục Bẻ Lái (VRY nối GPIO 35)
   #define PIN_JOY_SW              32    // Nút bấm ấn trục Joystick (SW nối GPIO 32)
 #endif
 
@@ -70,9 +70,11 @@
 #define JOY_INVERT_DRIVE        false   // Đặt true nếu gạt tới xe bị lùi
 #define JOY_INVERT_STEER        false   // Đặt true nếu gạt phải xe rẽ trái
 #define JOY_DEADBAND            220     // Vùng chết chống trôi lò xo (~ +-220 trên thang 4096)
+#define ENABLE_HARDWARE_JOYSTICK true   // Tự động nhận diện Joystick vật lý nếu cắm (GPIO 34, 35, 32)
 
 #define RADIO_CHANNEL           76      // Kênh RF 2476 MHz (khớp với STM32)
 #define CONTROL_INTERVAL_MS     20      // 50 Hz (20 ms) - Siêu mượt và tức thời!
+#define GCS_COMMAND_TIMEOUT_MS  400U    // Xóa lệnh PC nếu không nhận được gói gia hạn mới
 
 // Khởi tạo RF24 với tần số SPI 2 MHz (Tối ưu chống nhiễu trên dây cắm Dupont)
 RF24 radio(PIN_CE, PIN_CSN, 2000000);
@@ -84,8 +86,11 @@ const uint64_t RADIO_ADDR = 0xE7E7E7E7E7ULL;
 static RadioPacket_t txPacket;
 static uint16_t s_seq = 0;
 static uint32_t s_last_tx_ms = 0;
+static uint32_t s_last_gcs_command_ms = 0;
 static bool s_radio_ok = false;
 static bool s_force_tx_immediate = false;
+static bool s_gcs_control_active = false;
+static bool s_adas_enabled = true;
 
 // Trạng thái điều khiển hiện tại
 static int16_t s_current_drive = 0;     // -1000..1000
@@ -93,10 +98,10 @@ static int16_t s_current_steer = 0;     // -1000..1000
 static ProtocolCmd_t s_pending_cmd = CMD_DISARM;
 static uint8_t s_consecutive_fails = 0;
 
-// Trạng thái Joystick (1 Cần gạt 2 trục: GPIO 34, 35, 32)
+// Trạng thái Joystick
 static bool s_joystick_detected = false;
-static int  s_joy_center_x = 2048;      // Tâm Tiến / Lùi (GPIO 34)
-static int  s_joy_center_y = 2048;      // Tâm Bẻ Lái (GPIO 35)
+static int  s_joy_center_x = 2048;
+static int  s_joy_center_y = 2048;
 static bool s_joy_active = false;
 static uint32_t s_sw_press_time_ms = 0;
 static bool s_sw_last_state = HIGH;
@@ -120,10 +125,10 @@ void printMenu(void) {
   Serial.println("\n========================================================");
   Serial.println("  ESP32 DevKit V1 ↔ NRF24L01 Dongle & 8-Way Joystick");
   Serial.println("========================================================");
-  Serial.println("1. Kết nối Cần gạt Joystick 2 trục (34, 35, 32):");
+  Serial.println("1. Kết nối Cần gạt Joystick (Điều khiển khi không có PC):");
   Serial.println("   - VRX  -> GPIO 34 (Tiến / Lùi)");
   Serial.println("   - VRY  -> GPIO 35 (Bẻ Lái Trái / Phải)");
-  Serial.println("   - SW   -> GPIO 32 (Ấn ngắn: ARM/DISARM | Giữ >1s: ESTOP)");
+  Serial.println("   - SW   -> GPIO 32 (Ấn ngắn: ARM/DISARM | Ấn giữ 1.2s: ESTOP)");
   Serial.println("2. Lệnh qua USB Serial COM (115200 baud cho App Python):");
   Serial.println("   'ARM' / 'X' : ARM xe (bật cân bằng)");
   Serial.println("   'DISARM'/'Z': DISARM xe (tắt động cơ)");
@@ -139,6 +144,11 @@ void printMenu(void) {
 }
 
 void calibrateJoystick(void) {
+  if (!ENABLE_HARDWARE_JOYSTICK) {
+    s_joystick_detected = false;
+    return;
+  }
+  // ... giữ nguyên phần còn lại
   long sum_x = 0;
   long sum_y = 0;
   const int SAMPLES = 32;
@@ -152,11 +162,12 @@ void calibrateJoystick(void) {
   int avg_x = sum_x / SAMPLES;
   int avg_y = sum_y / SAMPLES;
 
-  if (avg_x > 1000 && avg_x < 3000 && avg_y > 1000 && avg_y < 3000) {
+  // Nếu chân cắm hở (floating) thường ra 0 hoặc 4095
+  if (avg_x > 1200 && avg_x < 2800 && avg_y > 1200 && avg_y < 2800) {
     s_joystick_detected = true;
     s_joy_center_x = avg_x;
     s_joy_center_y = avg_y;
-    Serial.printf("[JOYSTICK 🟢] Đã nhận diện Joystick (34, 35, 32)! Tâm chuẩn: X=%d (Tiến/Lùi), Y=%d (Bẻ Lái)\n", avg_x, avg_y);
+    Serial.printf("[JOYSTICK 🟢] Đã nhận diện Cần gạt Joystick! Tâm chuẩn: X=%d, Y=%d\n", avg_x, avg_y);
   } else {
     s_joystick_detected = false;
     Serial.printf("[JOYSTICK ℹ️] Không phát hiện Joystick (X=%d, Y=%d) -> Sử dụng USB Serial COM làm kênh chính.\n", avg_x, avg_y);
@@ -164,6 +175,7 @@ void calibrateJoystick(void) {
 }
 
 void setup() {
+  memset(&txPacket, 0, sizeof(txPacket));
   Serial.begin(115200);
   delay(100);
 
@@ -243,7 +255,15 @@ void processCommandLine(String line) {
   line.trim();
   if (line.length() == 0) return;
 
-  if (line.equalsIgnoreCase("ARM") || line.equalsIgnoreCase("X")) {
+  if (line.equalsIgnoreCase("ADAS:1")) {
+    s_adas_enabled = true;
+    s_force_tx_immediate = true;
+    Serial.println("ACK: ADAS ON");
+  } else if (line.equalsIgnoreCase("ADAS:0")) {
+    s_adas_enabled = false;
+    s_force_tx_immediate = true;
+    Serial.println("ACK: ADAS OFF");
+  } else if (line.equalsIgnoreCase("ARM") || line.equalsIgnoreCase("X")) {
     s_pending_cmd = CMD_ARM;
     s_force_tx_immediate = true;
     Serial.println("ACK: ARM");
@@ -251,12 +271,14 @@ void processCommandLine(String line) {
     s_pending_cmd = CMD_DISARM;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_gcs_control_active = false;
     s_force_tx_immediate = true;
     Serial.println("ACK: DISARM");
   } else if (line.equalsIgnoreCase("ESTOP") || line.equalsIgnoreCase("E")) {
     s_pending_cmd = CMD_ESTOP;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_gcs_control_active = false;
     s_force_tx_immediate = true;
     Serial.println("ACK: ESTOP");
   } else if (line.startsWith("DRIVE ") || line.startsWith("drive ")) {
@@ -266,27 +288,37 @@ void processCommandLine(String line) {
       s_current_drive = constrain(spd, -1000, 1000);
       s_current_steer = (n >= 2) ? constrain(str, -1000, 1000) : 0;
       s_pending_cmd = CMD_DRIVE;
+      s_last_gcs_command_ms = millis();
+      s_gcs_control_active = true;
       s_force_tx_immediate = true;
       Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
     }
   } else if (line == "w" || line == "W") {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = constrain(s_current_drive + 200, -1000, 1000);
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "s" || line == "S") {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = constrain(s_current_drive - 200, -1000, 1000);
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "a" || line == "A") {
     s_pending_cmd = CMD_DRIVE;
     s_current_steer = constrain(s_current_steer - 250, -1000, 1000);
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "d" || line == "D") {
     s_pending_cmd = CMD_DRIVE;
     s_current_steer = constrain(s_current_steer + 250, -1000, 1000);
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE %d %d (%s)\n", s_current_drive, s_current_steer, get_direction_8way(s_current_drive, s_current_steer));
   } else if (line == "q" || line == "Q") {
@@ -294,6 +326,8 @@ void processCommandLine(String line) {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = 300;
     s_current_steer = -250;
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE ↖ TIẾN-TRÁI (%d, %d)\n", s_current_drive, s_current_steer);
   } else if (line == "e" || line == "E_DRIVE") {
@@ -301,6 +335,8 @@ void processCommandLine(String line) {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = 300;
     s_current_steer = 250;
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE ↗ TIẾN-PHẢI (%d, %d)\n", s_current_drive, s_current_steer);
   } else if (line == "z" || line == "Z_DRIVE") {
@@ -308,6 +344,8 @@ void processCommandLine(String line) {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = -300;
     s_current_steer = -250;
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE ↙ LÙI-TRÁI (%d, %d)\n", s_current_drive, s_current_steer);
   } else if (line == "c" || line == "C") {
@@ -315,12 +353,15 @@ void processCommandLine(String line) {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = -300;
     s_current_steer = 250;
+    s_last_gcs_command_ms = millis();
+    s_gcs_control_active = true;
     s_force_tx_immediate = true;
     Serial.printf("ACK: DRIVE ↘ LÙI-PHẢI (%d, %d)\n", s_current_drive, s_current_steer);
   } else if (line == " " || line == "r" || line == "R") {
     s_pending_cmd = CMD_DRIVE;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_gcs_control_active = false;
     s_force_tx_immediate = true;
     Serial.println("ACK: STOP");
   } else if (line.equalsIgnoreCase("JOY CAL")) {
@@ -331,7 +372,7 @@ void processCommandLine(String line) {
     Serial.println("\n--- [TRẠNG THÁI ESP32 DONGLE & JOYSTICK] ---");
     Serial.printf(" 1. NRF24L01 Phần cứng : %s (Kênh 76 @ 1Mbps)\n", s_radio_ok ? "🟢 SẴN SÀNG" : "🔴 LỖI SPI");
     Serial.printf(" 2. Sóng xe STM32       : %s\n", (s_consecutive_fails < 4) ? "🟢 ĐÃ KẾT NỐI (Auto-ACK OK)" : "🟡 CHỜ XE BẬT NGUỒN");
-    Serial.printf(" 3. Cần gạt Joystick   : %s (VRX=GPIO 34 Tâm=%d, VRY=GPIO 35 Tâm=%d)\n", s_joystick_detected ? "🟢 ĐÃ KẾT NỐI" : "⚪ CHƯA CẮM", s_joy_center_x, s_joy_center_y);
+    Serial.printf(" 3. Cần gạt Joystick   : %s (X_center=%d, Y_center=%d)\n", s_joystick_detected ? "🟢 ĐANG BẬT" : "⚪ CHƯA KẾT NỐI", s_joy_center_x, s_joy_center_y);
     Serial.printf(" 4. Hướng & Lệnh       : %s | Tốc độ=%d | Bẻ lái=%d\n", get_direction_8way(s_current_drive, s_current_steer), s_current_drive, s_current_steer);
     Serial.println("--------------------------------------------\n");
   } else if (line == "?") {
@@ -340,15 +381,17 @@ void processCommandLine(String line) {
 }
 
 void handleJoystick(void) {
-  if (!s_joystick_detected) return;
-
-  uint32_t now = millis();
+  if (!ENABLE_HARDWARE_JOYSTICK || !s_joystick_detected) return;
 
   // 1. Xử lý nút nhấn SW của Joystick (GPIO 32)
   bool sw_state = digitalRead(PIN_JOY_SW);
+  uint32_t now = millis();
+
   if (sw_state == LOW && s_sw_last_state == HIGH) {
+    // Bắt đầu ấn nút
     s_sw_press_time_ms = now;
   } else if (sw_state == HIGH && s_sw_last_state == LOW) {
+    // Nhả nút
     uint32_t press_duration = now - s_sw_press_time_ms;
     if (press_duration >= 50 && press_duration < 1000) {
       // Ấn ngắn: Đổi trạng thái ARM <-> DISARM
@@ -356,19 +399,19 @@ void handleJoystick(void) {
         s_pending_cmd = CMD_DISARM;
         s_current_drive = 0;
         s_current_steer = 0;
-        Serial.println("[NÚT JOYSTICK (GPIO 32)] -> DISARM XE (Tắt động cơ)");
+        Serial.println("[NÚT JOYSTICK] -> DISARM XE (Tắt động cơ)");
       } else {
         s_pending_cmd = CMD_ARM;
-        Serial.println("[NÚT JOYSTICK (GPIO 32)] -> ARM XE (Bật cân bằng)");
+        Serial.println("[NÚT JOYSTICK] -> ARM XE (Bật cân bằng)");
       }
       s_force_tx_immediate = true;
     } else if (press_duration >= 1000) {
-      // Ấn giữ > 1 giây: DỪNG KHẨN CẤP (ESTOP)
+      // Ấn giữ > 1 giây: DỪNG KHẨN CẤP
       s_pending_cmd = CMD_ESTOP;
       s_current_drive = 0;
       s_current_steer = 0;
       s_force_tx_immediate = true;
-      Serial.println("[NÚT JOYSTICK (GPIO 32)] -> DỪNG KHẨN CẤP (ESTOP)!");
+      Serial.println("[NÚT JOYSTICK] -> DỪNG KHẨN CẤP (ESTOP)!");
     }
   }
   s_sw_last_state = sw_state;
@@ -382,8 +425,8 @@ void handleJoystick(void) {
   raw_x /= 4;
   raw_y /= 4;
 
-  int diff_x = raw_x - s_joy_center_x; // Trục Tiến / Lùi (GPIO 34)
-  int diff_y = raw_y - s_joy_center_y; // Trục Bẻ Lái Trái / Phải (GPIO 35)
+  int diff_x = raw_x - s_joy_center_x; // Trục Tiến / Lùi
+  int diff_y = raw_y - s_joy_center_y; // Trục Bẻ Lái
 
   if (JOY_INVERT_DRIVE) diff_x = -diff_x;
   if (JOY_INVERT_STEER) diff_y = -diff_y;
@@ -410,7 +453,7 @@ void handleJoystick(void) {
   joy_drive = constrain(joy_drive, -1000, 1000);
   joy_steer = constrain(joy_steer, -1000, 1000);
 
-  // Giới hạn vector hình tròn (Circle clamp) khi đi chéo góc 45 độ
+  // Giới hạn vector hình tròn (Circle clamp) khi gạt chéo góc 45 độ
   float mag = sqrtf((float)joy_drive * joy_drive + (float)joy_steer * joy_steer);
   if (mag > 1000.0f) {
     joy_drive = (int)(joy_drive * 1000.0f / mag);
@@ -422,6 +465,7 @@ void handleJoystick(void) {
     s_joy_active = true;
     s_current_drive = joy_drive;
     s_current_steer = joy_steer;
+    s_gcs_control_active = false;
     if (s_pending_cmd != CMD_ESTOP) {
       s_pending_cmd = CMD_DRIVE;
     }
@@ -430,6 +474,7 @@ void handleJoystick(void) {
     s_joy_active = false;
     s_current_drive = 0;
     s_current_steer = 0;
+    s_gcs_control_active = false;
     s_force_tx_immediate = true; // Gửi ngay lệnh dừng 0
   }
 }
@@ -454,6 +499,15 @@ void loop() {
   handleJoystick();
 
   uint32_t now = millis();
+
+  if (s_gcs_control_active &&
+      (now - s_last_gcs_command_ms) >= GCS_COMMAND_TIMEOUT_MS) {
+    s_current_drive = 0;
+    s_current_steer = 0;
+    s_pending_cmd = CMD_DRIVE;
+    s_gcs_control_active = false;
+    s_force_tx_immediate = true;
+  }
 
   if (!s_radio_ok) {
     static uint32_t s_last_err_ms = 0;
@@ -491,7 +545,9 @@ void loop() {
     txPacket.steer_cmd  = s_current_steer;
     txPacket.flags      = (s_pending_cmd == CMD_ESTOP) ? 0x01 : ((s_pending_cmd == CMD_ARM) ? 0x02 : 0x00);
 
-    for (int i = 0; i < 5; i++) txPacket.reserved[i] = 0;
+    txPacket.reserved[0] = PROTOCOL_ADAS_STATE_VALID |
+                           (s_adas_enabled ? PROTOCOL_ADAS_ENABLED : 0U);
+    for (int i = 1; i < 5; i++) txPacket.reserved[i] = 0;
 
     // Tính checksum
     txPacket.checksum = protocol_calc_checksum((const uint8_t*)&txPacket, sizeof(RadioPacket_t) - 2);

@@ -21,15 +21,30 @@
 #define WHEEL_DIAMETER_M            0.065f        /* 65 mm wheel diameter */
 #define WHEEL_DISTANCE_M            0.200f        /* Distance between 2 wheels in meters */
 
+#define ROBOT_WIDTH_CM              26.0f        /* Bề ngang phủ bì cả hai bánh */
+#define ROBOT_LENGTH_CM             10.0f
+#define AVOID_SIDE_SAFE_CM          28.0f        /* Ngưỡng phát hiện vật cản hai bên */
+#define AVOID_SIDE_STEER_MAX        0.12f
+#define AVOID_CRUISE_DRIVE          0.36f
+#define AVOID_TAIL_CLEAR_STEPS      2200.0f       /* Chạy thẳng thêm khoảng 15 cm để bánh sau vượt đuôi vật cản */
+#define AVOID_TAIL_CLEAR_MS         850U          /* Giới hạn thời gian chờ đệm thoát đuôi */
+#define AVOID_PHASE_TIMEOUT_MS      4000U         /* Timeout an toàn khi cảm biến chưa báo thoáng */
+#define AVOID_YAW_KP                0.015f
+#define AVOID_ALIGN_DURATION_MS     300U          /* Bù hướng ngắn sau khi vượt vật cản */
+
+#define MANUAL_DRIVE_GAIN           1.55f
+#define MANUAL_DRIVE_MIN_EFFECTIVE  0.24f
+#define MANUAL_DRIVE_MAX            0.85f
+
 /* Motor Direction Inversion (Đối xứng 2 bên sườn xe) */
 #define MOTOR_L_DIR_INVERT          0
 #define MOTOR_R_DIR_INVERT          1
 
 /* Speed & Acceleration Limits */
-#define STEP_FREQ_MAX_HZ            30000.0f      /* Max pulses/second limit */
-#define STEP_CRUISE_MAX_HZ          8000.0f       /* Tốc độ hành trình di chuyển tối đa (steps/sec) */
+#define STEP_FREQ_MAX_HZ            15000.0f      /* Max pulses/second limit */
+#define STEP_CRUISE_MAX_HZ          9000.0f       /* Tốc độ hành trình di chuyển tối đa (steps/sec) */
 #define STEP_ACCEL_MAX_HZ_PER_S     40000.0f      /* Max pulse acceleration (làm mịn gia tốc, triệt tiêu tiếng gằn máy) */
-#define MAX_TARGET_ANGLE_DEG        10.0f         /* Góc nghiêng tối đa khi di chuyển (tương đương BalancingWii) */
+#define MAX_TARGET_ANGLE_DEG        9.8f          /* Góc nghiêng tối đa khi di chuyển (tương đương BalancingWii) */
 
 /* ====================================================================
  * Safety & Thresholds (Tự động ARM khi giữ ở góc cân bằng 5s)
@@ -41,6 +56,7 @@
 #define AUTO_RECOVER_TICKS          100           /* Khi ngã, dựng lại 500 ms -> Tự động về DISARMED */
 #define IMU_MAX_CONSECUTIVE_ERRORS  5             /* Lỗi đọc IMU liên tiếp tối đa -> FAULT */
 #define RADIO_TIMEOUT_MS            1000          /* Mất sóng NRF quá thời gian này */
+#define CONTROL_LINK_TIMEOUT_MS     400           /* Mất cả lệnh UART và NRF */
 
 /* ====================================================================
  * IMU (MPU6050) Orientation & Filtering
@@ -60,7 +76,7 @@
 #define PID_ANGLE_KI                0.000001f     /* Tích phân góc nghiêng (Ki Góc = 0.000001) */
 
 #define PID_SPEED_KP                0.35f         /* Vòng ngoài điều khiển vận tốc xe (Kp Vận Tốc = 0.35) */
-#define PID_SPEED_KI                0.55f         /* Tích phân vận tốc (Ki Vận Tốc = 0.55) */
+#define PID_SPEED_KI                0.02f         /* Tích phân vận tốc (Ki Vận Tốc = 0.02) */
 
 #define PID_STEER_KP                1.2f          /* Hệ số quay xe (Kp Lái = 1.2) */
 
@@ -73,13 +89,23 @@
 #define RADIO_PAYLOAD_LEN           17            /* Bytes per packet (sizeof(RadioPacket_t)) */
 #define RADIO_TX_ADDR               0xE7E7E7E7E7ULL
 #define RADIO_RX_ADDR               0xE7E7E7E7E7ULL
-
+//
 /* ====================================================================
  * Obstacle Sensors (VL53L0X & HC-SR05)
  * ==================================================================== */
 #define TOF_READ_INTERVAL_MS        50            /* Đọc ToF mỗi 50 ms (20 Hz) */
-#define US_PING_INTERVAL_MS         40            /* Chuyển cảm biến siêu âm mỗi 40 ms */
-#define OBSTACLE_SLOWDOWN_DIST_CM   30            /* Khoảng cách bắt đầu giảm tốc */
+#define TOF_MEASUREMENT_TIMEOUT_MS  50            /* Timeout cho một phép đo ToF */
+#define TOF_INIT_RETRY_MS           500U          /* Thử khởi tạo lại ToF nếu lần đầu lỗi */
+#define TOF_MAX_VALID_RANGE_MM      2000U         /* Bỏ các mã range ngoài vùng sử dụng */
+#define TOF_CLIFF_LIMIT_MM          450U          /* Khoảng cách tối đa tới mặt sàn an toàn */
+#define TOF_CLIFF_CONFIRM_SAMPLES   3U            /* Số mẫu ToF liên tiếp xác nhận mép */
+#define US_PING_INTERVAL_MS         45U           /* Khoảng tối thiểu giữa các xung TRIG tuần tự */
+#define US_ECHO_RISE_TIMEOUT_US     20000U        /* Timeout tối đa chờ cạnh lên Echo (~340 cm) */
+#define US_ECHO_FALL_TIMEOUT_US     20000U        /* Timeout tối đa chờ cạnh xuống Echo (~340 cm) */
+#define US_SAMPLE_MAX_AGE_MS        400U          /* Mẫu siêu âm cũ hơn được coi là lỗi */
+#define OBSTACLE_SLOWDOWN_DIST_CM   40.0f         /* Ngưỡng phản xạ tránh vật cản phía trước */
 #define OBSTACLE_STOP_DIST_CM       12            /* Khoảng cách dừng khẩn cấp */
+#define DRIVER_ASSIST_STEER_MAX     0.15f         /* Giới hạn bù lái khi né vật cản */
+#define CLIFF_EXTRA_BACKUP_MS       400U          /* Lùi thêm sau khi ToF xác nhận đã trở lại mặt sàn */
 
 #endif /* CONFIG_H */

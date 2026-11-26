@@ -21,5 +21,6 @@ bool telemetry_uart_get_drive_cmd(float *drive, float *steer);
 
 /* Check if ESP32 Super Mini is currently communicating with STM32 via UART1 */
 bool telemetry_uart_is_supermini_linked(void);
+uint32_t telemetry_uart_get_tx_drop_count(void);
 
 #endif /* TELEMETRY_UART_H */

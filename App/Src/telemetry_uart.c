@@ -15,6 +15,7 @@
 
 #define UART_RX_BUFFER_SIZE     256
 #define UART_TX_BUFFER_SIZE     512
+#define UART_TX_QUEUE_DEPTH     4
 #define TELEMETRY_INTERVAL_MS   50    /* 20 Hz telemetry stream to ESP32 */
 
 UART_HandleTypeDef huart1;
@@ -29,12 +30,24 @@ static uint16_t s_rx_line_len = 0;
 static uint32_t s_last_telemetry_ms = 0;
 static uint32_t s_telemetry_seq = 0;
 
+typedef struct {
+    uint16_t length;
+    uint8_t data[UART_TX_BUFFER_SIZE];
+} UartTxMessage_t;
+
+static UartTxMessage_t s_tx_queue[UART_TX_QUEUE_DEPTH];
+static volatile uint8_t s_tx_head = 0U;
+static volatile uint8_t s_tx_tail = 0U;
+static bool s_tx_in_flight = false;
+static uint32_t s_tx_drop_count = 0U;
+
 static bool s_req_arm = false;
 static bool s_req_disarm = false;
 
 static volatile float s_uart_drive_cmd = 0.0f;
 static volatile float s_uart_steer_cmd = 0.0f;
 static volatile uint32_t s_uart_last_drive_ms = 0;
+static volatile bool s_uart_drive_received = false;
 static volatile uint32_t s_last_supermini_rx_ms = 0;
 
 static void usart1_gpio_init(void)
@@ -82,6 +95,11 @@ void telemetry_uart_init(void)
     s_rx_line_len = 0;
     s_last_telemetry_ms = 0;
     s_telemetry_seq = 0;
+    s_tx_head = 0U;
+    s_tx_tail = 0U;
+    s_tx_in_flight = false;
+    s_tx_drop_count = 0U;
+    s_uart_drive_received = false;
 
     /* Start non-blocking 1-byte receive interrupt */
     HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1);
@@ -127,18 +145,52 @@ void telemetry_uart_rx_isr(void)
     HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1);
 }
 
-static void uart_send_string(const char *str)
+static bool uart_send_string(const char *str)
 {
-    uint16_t len = (uint16_t)strlen(str);
-    if (len == 0) return;
-
-    /* Tự phục hồi state nếu trước đó bị lỗi hoặc timeout */
-    if (huart1.gState != HAL_UART_STATE_READY) {
-        huart1.gState = HAL_UART_STATE_READY;
+    size_t len = strlen(str);
+    if (len == 0U) {
+        return true;
     }
 
-    /* Timeout 80ms: Đủ thời gian truyền cả chuỗi mà không bị cắt cụt do ngắt TIM7/TIM6 */
-    HAL_UART_Transmit(&huart1, (const uint8_t*)str, len, 80);
+    if (len >= UART_TX_BUFFER_SIZE) {
+        s_tx_drop_count++;
+        return false;
+    }
+
+    uint8_t next = (uint8_t)((s_tx_head + 1U) % UART_TX_QUEUE_DEPTH);
+    if (next == s_tx_tail) {
+        s_tx_drop_count++;
+        return false;
+    }
+
+    s_tx_queue[s_tx_head].length = (uint16_t)len;
+    memcpy(s_tx_queue[s_tx_head].data, str, len);
+    s_tx_head = next;
+    return true;
+}
+
+static void uart_tx_service(void)
+{
+    if (s_tx_in_flight) {
+        if (huart1.gState != HAL_UART_STATE_READY) {
+            return;
+        }
+        s_tx_tail = (uint8_t)((s_tx_tail + 1U) % UART_TX_QUEUE_DEPTH);
+        s_tx_in_flight = false;
+    }
+
+    if (s_tx_tail == s_tx_head || huart1.gState != HAL_UART_STATE_READY) {
+        return;
+    }
+
+    UartTxMessage_t *message = &s_tx_queue[s_tx_tail];
+    HAL_StatusTypeDef status = HAL_UART_Transmit_IT(&huart1, message->data, message->length);
+    if (status == HAL_OK) {
+        s_tx_in_flight = true;
+    } else if (status != HAL_BUSY) {
+        s_tx_drop_count++;
+        s_tx_tail = (uint8_t)((s_tx_tail + 1U) % UART_TX_QUEUE_DEPTH);
+    }
 }
 
 static void process_json_command(const char *line)
@@ -201,6 +253,7 @@ static void process_json_command(const char *line)
         s_uart_drive_cmd = spd;
         s_uart_steer_cmd = str;
         s_uart_last_drive_ms = HAL_GetTick();
+        s_uart_drive_received = true;
     }
     else if (strstr(line, "\"type\":\"heartbeat\"")) {
         /* Heartbeat acknowledged */
@@ -255,12 +308,14 @@ static void process_text_command(char *line)
             s_uart_drive_cmd = spd;
             s_uart_steer_cmd = (n >= 2) ? str : 0.0f;
             s_uart_last_drive_ms = HAL_GetTick();
+            s_uart_drive_received = true;
         }
     }
     else if (strncmp(line, "STOP", 4) == 0) {
         s_uart_drive_cmd = 0.0f;
         s_uart_steer_cmd = 0.0f;
         s_uart_last_drive_ms = HAL_GetTick();
+        s_uart_drive_received = true;
     }
 }
 
@@ -295,6 +350,8 @@ static void send_telemetry(void)
 
     uint16_t dist_f = ultrasonic_get_dist_cm(US_FRONT);
     uint16_t tof_mm = tof_get_distance_mm();
+    bool tof_valid = tof_is_valid();
+    bool tof_available = tof_is_available();
 
     VehicleState_t state = sm_get_state();
     FaultReason_t fault = sm_get_fault_reason();
@@ -311,32 +368,37 @@ static void send_telemetry(void)
     uint8_t  nrf_st   = radio_get_last_status();
 
     bool spm_ok = telemetry_uart_is_supermini_linked();
+    bool adas_enabled = radio_get_adas_enabled();
     float trim = balance_get_target_offset();
     bool upright = (fabsf(pitch - trim) <= ARM_UPRIGHT_ANGLE_DEG);
     float arm_cd = sm_get_auto_arm_countdown_s();
 
-    char buf[460];
+    char buf[500];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"telemetry\",\"seq\":%lu,\"state\":%d,\"fault\":%d,\"pitch\":%.2f,\"target\":%.2f,\"rate\":%.2f,"
         "\"rpm_l\":%.1f,\"rpm_r\":%.1f,\"kp\":%.2f,\"kd\":%.2f,\"ki\":%.6f,\"kp_s\":%.2f,\"ki_s\":%.2f,\"steer\":%.2f,\"trim\":%.2f,"
-        "\"dist_f\":%u,\"tof_mm\":%u,\"bat\":14.8,"
+        "\"dist_f\":%u,\"tof_mm\":%u,\"tof_valid\":%s,\"tof_available\":%s,\"bat\":14.8,"
         "\"mpu_ok\":%s,\"imu_err\":%lu,\"nrf_hw\":%s,\"nrf_link\":%s,"
         "\"nrf_pkts\":%lu,\"nrf_seq\":%u,\"nrf_age\":%lu,\"nrf_drv\":%d,\"nrf_str\":%d,\"nrf_st\":%u,"
-        "\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f}\r\n",
+        "\"supermini_ok\":%s,\"upright\":%s,\"arm_cd\":%.1f,\"adas\":%s}\r\n",
         (unsigned long)s_telemetry_seq++, (int)state, (int)fault,
         pitch, target_pitch, rate,
         left_rpm, right_rpm, kp, kd, ki, kp_s, ki_s, steer, trim,
         (unsigned)dist_f, (unsigned)tof_mm,
+        tof_valid ? "true" : "false", tof_available ? "true" : "false",
         mpu_ok ? "true" : "false", (unsigned long)imu_err,
         nrf_hw ? "true" : "false", nrf_link ? "true" : "false",
         (unsigned long)nrf_pkts, (unsigned)nrf_seq, (unsigned long)nrf_age, (int)nrf_drv, (int)nrf_str, (unsigned)nrf_st,
-        spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd);
+        spm_ok ? "true" : "false", upright ? "true" : "false", arm_cd,
+        adas_enabled ? "true" : "false");
 
     uart_send_string(buf);
 }
 
 void telemetry_uart_update(uint32_t current_time_ms)
 {
+    uart_tx_service();
+
     /* Tự động kích hoạt lại RX interrupt nếu bị treo hoặc mất cờ */
     if (huart1.RxState != HAL_UART_STATE_BUSY_RX) {
         __HAL_UART_CLEAR_OREFLAG(&huart1);
@@ -371,6 +433,8 @@ void telemetry_uart_update(uint32_t current_time_ms)
         s_last_telemetry_ms = current_time_ms;
         send_telemetry();
     }
+
+    uart_tx_service();
 }
 
 bool telemetry_uart_get_arm_request(void)
@@ -394,7 +458,8 @@ bool telemetry_uart_get_disarm_request(void)
 bool telemetry_uart_get_drive_cmd(float *drive, float *steer)
 {
     uint32_t now = HAL_GetTick();
-    if ((now - s_uart_last_drive_ms) < 600) {
+    if (s_uart_drive_received &&
+        ((now - s_uart_last_drive_ms) < CONTROL_LINK_TIMEOUT_MS)) {
         if (drive) *drive = s_uart_drive_cmd;
         if (steer) *steer = s_uart_steer_cmd;
         return true;
@@ -405,4 +470,9 @@ bool telemetry_uart_get_drive_cmd(float *drive, float *steer)
 bool telemetry_uart_is_supermini_linked(void)
 {
     return (s_last_supermini_rx_ms > 0 && ((HAL_GetTick() - s_last_supermini_rx_ms) < 2000));
+}
+
+uint32_t telemetry_uart_get_tx_drop_count(void)
+{
+    return s_tx_drop_count;
 }

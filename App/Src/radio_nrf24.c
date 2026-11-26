@@ -36,6 +36,7 @@ static float s_cmd_steer = 0.0f;
 static bool  s_cmd_arm = false;
 static bool  s_cmd_disarm = false;
 static bool  s_cmd_estop = false;
+static volatile bool s_adas_enabled = true;
 
 static uint32_t s_packet_count = 0;
 static uint16_t s_last_seq = 0;
@@ -219,6 +220,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     s_last_raw_drive = 0;
     s_last_raw_steer = 0;
     s_last_raw_status = 0;
+    s_adas_enabled = true;
 
     ce_low();
     csn_high();
@@ -311,6 +313,10 @@ void radio_update(uint32_t current_time_ms)
                     s_last_raw_drive = packet.drive_cmd;
                     s_last_raw_steer = packet.steer_cmd;
 
+                    if ((packet.reserved[0] & PROTOCOL_ADAS_STATE_VALID) != 0U) {
+                        s_adas_enabled = ((packet.reserved[0] & PROTOCOL_ADAS_ENABLED) != 0U);
+                    }
+
                     s_cmd_drive = (float)packet.drive_cmd / 1000.0f; /* Normalization -1.0 .. +1.0 */
                     s_cmd_steer = (float)packet.steer_cmd / 1000.0f;
 
@@ -386,6 +392,11 @@ void radio_get_raw_commands(int16_t *drive_cmd, int16_t *steer_cmd)
 uint8_t radio_get_last_status(void)
 {
     return s_last_raw_status;
+}
+
+bool radio_get_adas_enabled(void)
+{
+    return s_adas_enabled;
 }
 
 bool radio_check_hardware(uint8_t *status, uint8_t *config, uint8_t *channel)

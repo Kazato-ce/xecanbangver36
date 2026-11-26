@@ -7,6 +7,7 @@
 
 bool tof_init(I2C_HandleTypeDef *hi2c);
 void tof_update(uint32_t current_time_ms);
+bool tof_is_available(void);
 uint16_t tof_get_distance_mm(void);
 bool tof_is_valid(void);
 void tof_evaluate_cliff(float pitch_deg);

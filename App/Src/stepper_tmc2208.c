@@ -20,6 +20,8 @@ typedef struct {
 static MotorState_t s_motors[MOTOR_COUNT];
 static volatile bool s_is_enabled = false;
 static volatile bool s_estop_tripped = false;
+volatile int32_t g_motor_steps_left = 0;
+volatile int32_t g_motor_steps_right = 0;
 
 static inline float clampf(float v, float min_val, float max_val)
 {
@@ -54,6 +56,8 @@ void stepper_init(void)
 
     s_is_enabled = false;
     s_estop_tripped = false;
+    g_motor_steps_left = 0;
+    g_motor_steps_right = 0;
 
     for (int i = 0; i < MOTOR_COUNT; i++) {
         MotorState_t *m = &s_motors[i];
@@ -169,6 +173,33 @@ float stepper_get_speed(MotorId_t motor)
     return (motor < MOTOR_COUNT) ? s_motors[motor].applied_steps_s : 0.0f;
 }
 
+void motor_get_steps(int32_t *left, int32_t *right)
+{
+    if (left) {
+        *left = g_motor_steps_left;
+    }
+    if (right) {
+        *right = g_motor_steps_right;
+    }
+}
+
+static void motor_count_step(volatile int32_t *steps, bool forward)
+{
+    if (forward) {
+        if (*steps == INT32_MAX) {
+            *steps = INT32_MIN;
+        } else {
+            (*steps)++;
+        }
+    } else {
+        if (*steps == INT32_MIN) {
+            *steps = INT32_MAX;
+        } else {
+            (*steps)--;
+        }
+    }
+}
+
 /* 20 kHz interrupt routine called from TIM7 */
 void stepper_step_isr(void)
 {
@@ -195,6 +226,12 @@ void stepper_step_isr(void)
         set_pins_r = BOARD_MOTOR_R_STEP_PIN;
     }
 
-    if (set_pins_l) BOARD_MOTOR_L_STEP_PORT->BSRR = set_pins_l;
-    if (set_pins_r) BOARD_MOTOR_R_STEP_PORT->BSRR = set_pins_r;
+    if (set_pins_l) {
+        BOARD_MOTOR_L_STEP_PORT->BSRR = set_pins_l;
+        motor_count_step(&g_motor_steps_left, s_motors[MOTOR_LEFT].logical_fwd);
+    }
+    if (set_pins_r) {
+        BOARD_MOTOR_R_STEP_PORT->BSRR = set_pins_r;
+        motor_count_step(&g_motor_steps_right, s_motors[MOTOR_RIGHT].logical_fwd);
+    }
 }

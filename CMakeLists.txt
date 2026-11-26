@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set the project name
-set(CMAKE_PROJECT_NAME xecanbangver36)
+set(CMAKE_PROJECT_NAME XECANBANGFINAL)
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -57,26 +57,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c
     Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c
     Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c
-    Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd.c
-    Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd_ex.c
-    Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c
-    USB_DEVICE/App/usb_device.c
-    USB_DEVICE/App/usbd_desc.c
-    USB_DEVICE/App/usbd_cdc_if.c
-    USB_DEVICE/Target/usbd_conf.c
-    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
-    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
-    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
-    Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Inc
-    USB_DEVICE/App
-    USB_DEVICE/Target
-    Middlewares/ST/STM32_USB_Device_Library/Core/Inc
-    Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
 )
 
 # Add compile options
@@ -97,10 +82,6 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
     m
-)
-
-target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
-    -u _printf_float
 )
 
 get_filename_component(ARM_TOOLCHAIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
