@@ -6,29 +6,31 @@
 
 ## 📌 LIÊN KẾT TRỰC QUAN (VIDEO DEMO & SLIDE BÁO CÁO)
 
-Dành cho người đọc, giảng viên và hội đồng chấm điểm muốn xem nhanh kết quả và báo cáo đề tài:
+Dành cho người đọc, giảng viên và hội đồng chấm điểm muốn xem nhanh kết quả và bài báo cáo đề tài:
 
-* 🎥 **Video Demo Vận Hành Thực Tế:**  
-  👉 [**[BẤM VÀO ĐÂY ĐỂ XEM VIDEO DEMO TRÊN YOUTUBE / DRIVE]**](https://www.youtube.com/watch?v=YOUR_VIDEO_ID_HERE)  
-  *(Mô tả: Video quay cận cảnh xe tự cân bằng tại chỗ, di chuyển tiến/lùi, bẻ lái 8 hướng, thử nghiệm né vật cản ADAS và chống rơi mép sàn ToF)*
+<div align="center">
 
-* 📊 **Slide Thuyết Trình Báo Cáo (Canva):**  
-  👉 [**[BẤM VÀO ĐÂY ĐỂ MỞ SLIDE THUYẾT TRÌNH CANVA]**](https://www.canva.com/design/YOUR_CANVA_LINK_HERE)  
-  *(Mô tả: Toàn bộ slide thuyết trình đồ án với hình ảnh thiết kế 3D, sơ đồ khối, lưu đồ thuật toán và kết quả thử nghiệm)*
+[![YouTube Video Demo](https://img.shields.io/badge/YouTube-XEM%20VIDEO%20DEMO%20THỰC%20TẾ-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID_HERE)
+&nbsp;&nbsp;&nbsp;&nbsp;
+[![Canva Slide Presentation](https://img.shields.io/badge/Canva-XEM%20SLIDE%20THUYẾT%20TRÌNH-00C4CC?style=for-the-badge&logo=canva&logoColor=white)](https://www.canva.com/design/YOUR_CANVA_LINK_HERE)
+
+</div>
+
+| Nền tảng | Liên kết trực tiếp | Nội dung chi tiết |
+|:---:|---|---|
+| <img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Youtube_logo.png" width="28" alt="YouTube"/> **YouTube** | [▶️ **Bấm vào đây để xem Video Demo**](https://www.youtube.com/watch?v=YOUR_VIDEO_ID_HERE) | Video quay cận cảnh xe tự cân bằng tại chỗ, di chuyển tiến/lùi, bẻ lái 8 hướng, thử nghiệm né vật cản ADAS và chống rơi mép sàn ToF. |
+| <img src="https://upload.wikimedia.org/wikipedia/commons/0/08/Canva_icon_2021.svg" width="24" alt="Canva"/> **Canva** | [📑 **Bấm vào đây để mở Slide Canva**](https://www.canva.com/design/YOUR_CANVA_LINK_HERE) | Toàn bộ slide thuyết trình đồ án với hình ảnh thiết kế 3D, sơ đồ khối, lưu đồ thuật toán và kết quả thử nghiệm thực tế. |
 
 ---
 
 ## 👥 THÔNG TIN NHÓM THỰC HIỆN
 
-| STT | Họ và Tên | MSSV | Vai trò chính trong dự án |
-|:---:|---|:---:|---|
-| **1** | **Nguyễn Tiến Thành** *(Kazato-ce)* | [Điền MSSV] | Trưởng nhóm, Thiết kế kiến trúc Firmware STM32, Vòng cân bằng PID, Tích hợp cảm biến IMU & DDS Stepper |
-| **2** | **Đặng Thế Tứ** *(dangthetu)* | [Điền MSSV] | Thiết kế phần cứng mạch, Hệ thống truyền hình ảnh FPV Camera UDP, Ground Control Station (GCS) Python |
-| **3** | **Phan Minh Quân** *(minhquan1120006)* | 24521428 | Phát triển cầu nối không dây NRF24, Hệ thống đo khoảng cách siêu âm & Thử nghiệm thực tế |
-
-* **Giảng viên hướng dẫn:** [Tên Thầy/Cô Hướng Dẫn]
-* **Năm học / Học kỳ:** Học kỳ 1 — Năm học 2026 - 2027
-
+| STT | Họ và Tên | Vai trò chính trong dự án |
+|:---:|---|---|
+| **1** | **Nguyễn Đoàn Thanh Phong** *(Kazato-ce)* | Trưởng nhóm, Thiết kế kiến trúc Firmware STM32, Vòng cân bằng PID, Tích hợp cảm biến IMU & DDS Stepper |
+| **2** | **Đặng Thế Tứ** *(dangthetu)* | Thiết kế phần cứng mạch, Hệ thống FPV Camera Stream UDP, Ground Control Station (GCS) Python |
+| **3** | **Lê Văn Lộc** *(levanloc)* | Phát triển hệ thống nhận diện cử chỉ bàn tay AI MediaPipe & Điều khiển không dây |
+| **4** | **Phan Minh Quân** *(minhquan1120006)* | Phát triển cầu nối NRF24 Dongle, Cụm cảm biến siêu âm & Thử nghiệm thực tế | 
 ---
 
 ## 🌟 ĐẶC ĐIỂM NỔI BẬT CỦA HỆ THỐNG
