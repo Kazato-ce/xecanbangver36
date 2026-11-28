@@ -20,43 +20,11 @@ static TIM_HandleTypeDef s_htim7;
 static SPI_HandleTypeDef s_hspi2;
 static volatile bool s_tof_available = false;
 static bool s_cliff_retreat_active = false;
-static bool s_cliff_clear_timing = false;
-static volatile bool s_adas_enabled = true;
-static uint32_t s_cliff_clear_since_ms = 0U;
-volatile uint8_t g_avoid_last_abort_reason = 0U;
-
-typedef enum {
-    AVOID_IDLE = 0,
-    AVOID_REFLEX,
-    AVOID_TAIL_CLEAR,
-    AVOID_ALIGN
-} AvoidState_t;
-
-static AvoidState_t s_avoid_state = AVOID_IDLE;
-static int8_t s_avoid_dir = 0;
-static float s_avoid_yaw_deg = 0.0f;
-static float s_avoid_tail_steps = 0.0f;
-static int32_t s_avoid_prev_left_steps = 0;
-static int32_t s_avoid_prev_right_steps = 0;
-static uint32_t s_avoid_tail_clear_since_ms = 0U;
-static uint32_t s_avoid_align_since_ms = 0U;
-static uint32_t s_avoid_phase_since_ms = 0U;
-static uint8_t s_avoid_front_close_hits = 0U;
+static volatile bool s_adas_enabled = false;
 
 static float app_clampf(float value, float min_value, float max_value)
 {
     return (value < min_value) ? min_value : ((value > max_value) ? max_value : value);
-}
-
-static float app_step_delta(int32_t current, int32_t previous)
-{
-    int64_t delta = (int64_t)current - (int64_t)previous;
-    if (delta > INT32_MAX) {
-        delta -= 4294967296LL;
-    } else if (delta < INT32_MIN) {
-        delta += 4294967296LL;
-    }
-    return (float)delta;
 }
 
 static void app_apply_manual_drive_gain(float *cmd_drive)
@@ -98,338 +66,30 @@ static bool app_get_clearance_cm(UltrasonicId_t id, uint32_t now_ms, float *clea
     }
 }
 
-static void app_reset_avoidance(void)
+static void app_apply_adas_speed_limit(float *cmd_drive, uint32_t now_ms)
 {
-    s_avoid_state = AVOID_IDLE;
-    s_avoid_dir = 0;
-    s_avoid_yaw_deg = 0.0f;
-    s_avoid_tail_steps = 0.0f;
-    s_avoid_tail_clear_since_ms = 0U;
-    s_avoid_align_since_ms = 0U;
-    s_avoid_phase_since_ms = 0U;
-    s_avoid_front_close_hits = 0U;
-}
+    if (!cmd_drive || *cmd_drive <= 0.0f) {
+        return;
+    }
 
-static void app_abort_avoidance(uint8_t reason)
-{
-    g_avoid_last_abort_reason = reason;
-    app_reset_avoidance();
-}
-
-static void app_start_avoidance(int8_t direction,
-                                uint32_t now_ms)
-{
-    g_avoid_last_abort_reason = 0U;
-    s_avoid_dir = direction;
-    s_avoid_yaw_deg = 0.0f;
-    s_avoid_tail_steps = 0.0f;
-    motor_get_steps(&s_avoid_prev_left_steps, &s_avoid_prev_right_steps);
-    s_avoid_tail_clear_since_ms = 0U;
-    s_avoid_align_since_ms = 0U;
-    s_avoid_phase_since_ms = now_ms;
-    s_avoid_front_close_hits = 0U;
-    s_avoid_state = AVOID_REFLEX;
-}
-
-static int8_t app_select_avoidance_direction(bool front_blocked,
-                                             bool left_blocked,
-                                             bool right_blocked,
-                                             bool left_open,
-                                             bool right_open,
-                                             float left_cm,
-                                             float right_cm)
-{
-    if (left_blocked && right_blocked) {
-        return 0;
-    }
-    if (left_blocked) {
-        return right_open ? -1 : 0;
-    }
-    if (right_blocked) {
-        return left_open ? 1 : 0;
-    }
-    if (!front_blocked) {
-        return 0;
-    }
-    if (left_open && right_open) {
-        return (right_cm > left_cm) ? -1 : 1;
-    }
-    if (left_open) {
-        return -1;
-    }
-    if (right_open) {
-        return 1;
-    }
-    return 0;
-}
-
-static bool app_update_avoidance(float *cmd_drive,
-                                 float *cmd_steer,
-                                 bool cliff_detected,
-                                 float raw_drive,
-                                 float raw_steer,
-                                 float pitch_deg,
-                                 uint32_t now_ms)
-{
     float front_cm = 0.0f;
     bool front_valid = app_get_clearance_cm(US_FRONT, now_ms, &front_cm);
     float left_cm = 0.0f;
     float right_cm = 0.0f;
     bool left_valid = app_get_clearance_cm(US_LEFT, now_ms, &left_cm);
     bool right_valid = app_get_clearance_cm(US_RIGHT, now_ms, &right_cm);
-    bool front_blocked = front_valid &&
-                         (front_cm < (float)OBSTACLE_SLOWDOWN_DIST_CM);
-    bool left_blocked = left_valid && (left_cm < AVOID_SIDE_SAFE_CM);
-    bool right_blocked = right_valid && (right_cm < AVOID_SIDE_SAFE_CM);
-    bool left_open = left_valid && (left_cm >= AVOID_SIDE_SAFE_CM);
-    bool right_open = right_valid && (right_cm >= AVOID_SIDE_SAFE_CM);
-    bool obstacle_detected = front_blocked || left_blocked || right_blocked;
-    bool all_sensors_clear = front_valid && left_valid && right_valid &&
-                             (front_cm >= (float)OBSTACLE_SLOWDOWN_DIST_CM) &&
-                             left_open && right_open;
 
-    if (s_avoid_state == AVOID_IDLE) {
-        if (cliff_detected || *cmd_drive <= 0.05f || !obstacle_detected) {
-            return false;
-        }
-
-        int8_t direction = app_select_avoidance_direction(front_blocked,
-                                                          left_blocked,
-                                                          right_blocked,
-                                                          left_open,
-                                                          right_open,
-                                                          left_cm,
-                                                          right_cm);
-        if (direction == 0) {
-            *cmd_drive = 0.0f;
-            *cmd_steer = 0.0f;
-            return true;
-        }
-
-        app_start_avoidance(direction, now_ms);
-    } else if (cliff_detected || raw_drive < -0.05f ||
-               fabsf(raw_steer) > 0.05f) {
-        if (cliff_detected) {
-            app_abort_avoidance(2U);
-        } else {
-            app_abort_avoidance(1U);
-        }
-        return false;
-    }
-
-    if ((now_ms - s_avoid_phase_since_ms) >= AVOID_PHASE_TIMEOUT_MS) {
-        app_abort_avoidance(4U);
-        *cmd_drive = 0.0f;
-        *cmd_steer = 0.0f;
-        return true;
-    }
-
-    s_avoid_yaw_deg -= imu_get_gyro_z_dps() * CONTROL_DT_S;
-
-    int32_t current_left_steps = 0;
-    int32_t current_right_steps = 0;
-    motor_get_steps(&current_left_steps, &current_right_steps);
-    float ds_left = app_step_delta(current_left_steps, s_avoid_prev_left_steps);
-    float ds_right = app_step_delta(current_right_steps, s_avoid_prev_right_steps);
-    /* Hai encoder dùng cùng quy ước logical-fwd:
-     * bước tiến của thân xe là trung bình có dấu của hai motor.
-     * Quay ngược chiều hủy nhau thay vì bị cộng trị tuyệt đối thành quãng tiến giả.
-     */
-    float ds_fwd = 0.5f * (ds_left + ds_right);
-    if (ds_fwd < 0.0f) {
-        ds_fwd = 0.0f;
-    }
-    s_avoid_prev_left_steps = current_left_steps;
-    s_avoid_prev_right_steps = current_right_steps;
-    if (s_avoid_state == AVOID_TAIL_CLEAR) {
-        s_avoid_tail_steps += ds_fwd;
-    }
-
-    if (fabsf(pitch_deg) <= 10.0f &&
-        front_valid &&
-        (front_cm <= (float)OBSTACLE_STOP_DIST_CM)) {
-        if (s_avoid_front_close_hits < 3U) {
-            s_avoid_front_close_hits++;
-        }
-        if (s_avoid_front_close_hits >= 3U) {
-            app_abort_avoidance(3U);
-            *cmd_drive = 0.0f;
-            *cmd_steer = 0.0f;
-            return true;
-        }
-    } else {
-        s_avoid_front_close_hits = 0U;
-    }
-
-    switch (s_avoid_state) {
-        case AVOID_REFLEX:
-            if (obstacle_detected) {
-                int8_t direction = app_select_avoidance_direction(front_blocked,
-                                                                  left_blocked,
-                                                                  right_blocked,
-                                                                  left_open,
-                                                                  right_open,
-                                                                  left_cm,
-                                                                  right_cm);
-                if (direction == 0) {
-                    *cmd_drive = 0.0f;
-                    *cmd_steer = 0.0f;
-                    break;
-                }
-                s_avoid_dir = direction;
-            }
-            if (all_sensors_clear) {
-                s_avoid_state = AVOID_TAIL_CLEAR;
-                s_avoid_tail_steps = 0.0f;
-                s_avoid_tail_clear_since_ms = now_ms;
-                motor_get_steps(&s_avoid_prev_left_steps, &s_avoid_prev_right_steps);
-                s_avoid_phase_since_ms = now_ms;
-                *cmd_drive = AVOID_CRUISE_DRIVE;
-                *cmd_steer = 0.0f;
-                break;
-            }
-            *cmd_drive = (obstacle_detected || front_valid || left_valid || right_valid)
-                       ? AVOID_CRUISE_DRIVE
-                       : 0.0f;
-            *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
-            break;
-
-        case AVOID_TAIL_CLEAR:
-            if (obstacle_detected) {
-                int8_t direction = app_select_avoidance_direction(front_blocked,
-                                                                  left_blocked,
-                                                                  right_blocked,
-                                                                  left_open,
-                                                                  right_open,
-                                                                  left_cm,
-                                                                  right_cm);
-                if (direction == 0) {
-                    *cmd_drive = 0.0f;
-                    *cmd_steer = 0.0f;
-                    break;
-                }
-                s_avoid_dir = direction;
-                s_avoid_state = AVOID_REFLEX;
-                s_avoid_phase_since_ms = now_ms;
-                *cmd_drive = AVOID_CRUISE_DRIVE;
-                *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
-                break;
-            }
-
-            *cmd_drive = AVOID_CRUISE_DRIVE;
-            *cmd_steer = 0.0f;
-            if ((s_avoid_tail_steps >= AVOID_TAIL_CLEAR_STEPS) ||
-                ((now_ms - s_avoid_tail_clear_since_ms) >= AVOID_TAIL_CLEAR_MS)) {
-                s_avoid_state = AVOID_ALIGN;
-                s_avoid_align_since_ms = now_ms;
-                s_avoid_phase_since_ms = now_ms;
-            }
-            break;
-
-        case AVOID_ALIGN:
-            if (obstacle_detected) {
-                int8_t direction = app_select_avoidance_direction(front_blocked,
-                                                                  left_blocked,
-                                                                  right_blocked,
-                                                                  left_open,
-                                                                  right_open,
-                                                                  left_cm,
-                                                                  right_cm);
-                if (direction == 0) {
-                    *cmd_drive = 0.0f;
-                    *cmd_steer = 0.0f;
-                    break;
-                }
-                s_avoid_dir = direction;
-                s_avoid_state = AVOID_REFLEX;
-                s_avoid_phase_since_ms = now_ms;
-                *cmd_drive = AVOID_CRUISE_DRIVE;
-                *cmd_steer = (float)s_avoid_dir * AVOID_SIDE_STEER_MAX;
-                break;
-            }
-
-            *cmd_drive = AVOID_CRUISE_DRIVE;
-            *cmd_steer = app_clampf(-s_avoid_yaw_deg * AVOID_YAW_KP,
-                                    -AVOID_SIDE_STEER_MAX,
-                                    AVOID_SIDE_STEER_MAX);
-            if ((now_ms - s_avoid_align_since_ms) >= AVOID_ALIGN_DURATION_MS) {
-                app_reset_avoidance();
-                *cmd_drive = 0.0f;
-                *cmd_steer = 0.0f;
-                return true;
-            }
-            break;
-
-        case AVOID_IDLE:
-        default:
-            return false;
-    }
-
-    return true;
-}
-
-static void app_apply_driver_assist(float *cmd_drive, float *cmd_steer, uint32_t now_ms)
-{
-    if (!cmd_drive || !cmd_steer || *cmd_drive <= 0.05f) {
-        return;
-    }
-
-    float front_cm = 0.0f;
-    if (!app_get_clearance_cm(US_FRONT, now_ms, &front_cm)) {
+    if ((front_valid && front_cm <= ADAS_STOP_DIST_CM) ||
+        (left_valid && left_cm <= ADAS_SIDE_STOP_CM) ||
+        (right_valid && right_cm <= ADAS_SIDE_STOP_CM)) {
         *cmd_drive = 0.0f;
         return;
     }
 
-    if (front_cm > (float)OBSTACLE_SLOWDOWN_DIST_CM) {
-        float left_cm = 0.0f;
-        float right_cm = 0.0f;
-        if (!app_get_clearance_cm(US_LEFT, now_ms, &left_cm) ||
-            !app_get_clearance_cm(US_RIGHT, now_ms, &right_cm)) {
-            return;
-        }
-
-        bool left_too_close = left_cm < AVOID_SIDE_SAFE_CM;
-        bool right_too_close = right_cm < AVOID_SIDE_SAFE_CM;
-        if (left_too_close && right_too_close) {
-            *cmd_drive = 0.0f;
-            *cmd_steer = 0.0f;
-        } else if (left_too_close) {
-            *cmd_steer = app_clampf(*cmd_steer - AVOID_SIDE_STEER_MAX, -1.0f, 1.0f);
-        } else if (right_too_close) {
-            *cmd_steer = app_clampf(*cmd_steer + AVOID_SIDE_STEER_MAX, -1.0f, 1.0f);
-        }
-        return;
-    }
-
-    float left_cm = 0.0f;
-    float right_cm = 0.0f;
-    bool left_valid = app_get_clearance_cm(US_LEFT, now_ms, &left_cm);
-    bool right_valid = app_get_clearance_cm(US_RIGHT, now_ms, &right_cm);
-    if (left_valid && right_valid &&
-        left_cm < AVOID_SIDE_SAFE_CM &&
-        right_cm < AVOID_SIDE_SAFE_CM) {
-        *cmd_drive = 0.0f;
-        *cmd_steer = 0.0f;
-        return;
-    }
-
-    if (front_cm <= (float)OBSTACLE_STOP_DIST_CM) {
-        *cmd_drive = 0.0f;
-        *cmd_steer = 0.0f;
-        return;
-    } else {
-        float speed_scale = (front_cm - (float)OBSTACLE_STOP_DIST_CM)
-                          / (float)(OBSTACLE_SLOWDOWN_DIST_CM - OBSTACLE_STOP_DIST_CM);
+    if (front_valid && front_cm <= ADAS_SLOW_DIST_CM) {
+        float speed_scale = (front_cm - ADAS_STOP_DIST_CM) /
+                            (ADAS_SLOW_DIST_CM - ADAS_STOP_DIST_CM);
         *cmd_drive *= app_clampf(speed_scale, 0.0f, 1.0f);
-    }
-
-    if (left_valid && right_valid) {
-        float max_clearance = (left_cm > right_cm) ? left_cm : right_cm;
-        if (max_clearance > 0.0f) {
-            float steer_bias = ((left_cm - right_cm) / max_clearance)
-                             * DRIVER_ASSIST_STEER_MAX;
-            *cmd_steer = app_clampf(*cmd_steer + steer_bias, -1.0f, 1.0f);
-        }
     }
 }
 
@@ -542,9 +202,7 @@ void app_timer_control_tick(void)
 {
     bool requested_adas_enabled = radio_get_adas_enabled();
     if (s_adas_enabled && !requested_adas_enabled) {
-        app_reset_avoidance();
         s_cliff_retreat_active = false;
-        s_cliff_clear_timing = false;
     }
     s_adas_enabled = requested_adas_enabled;
 
@@ -595,81 +253,63 @@ void app_timer_control_tick(void)
         cmd_drive = nrf_drive;
         cmd_steer = nrf_steer;
     }
-    float raw_drive = cmd_drive;
-    float raw_steer = cmd_steer;
-
     bool control_link_ok = radio_recent || uart_has_drive;
 
     /* Cập nhật Máy trạng thái */
-    sm_update(pitch, control_link_ok, arm_req, disarm_req, estop_req, imu_err);
+    sm_update(pitch, radio_recent, arm_req, disarm_req, estop_req, imu_err);
 
     bool is_armed = (sm_get_state() == STATE_ARMED);
 
     if (is_armed) {
+        bool fast_adas_drive_release = false;
+
+        if (!radio_recent) {
+            cmd_drive = 0.0f;
+            cmd_steer = 0.0f;
+            s_cliff_retreat_active = false;
+        }
+
         app_apply_manual_drive_gain(&cmd_drive);
 
-        if (!control_link_ok && s_avoid_state == AVOID_IDLE) {
+        if (!radio_recent || !control_link_ok) {
             cmd_drive = 0.0f;
             cmd_steer = 0.0f;
         }
 
         if (s_adas_enabled) {
+            bool cliff_control_active = cliff_detected || s_cliff_retreat_active;
+            float drive_before_adas = cmd_drive;
+
             /* Phản xạ chống rơi mép bàn / rơi vực (ToF Anti-Cliff Protection). */
             if (cliff_detected) {
                 s_cliff_retreat_active = true;
-                s_cliff_clear_timing = false;
-                cmd_drive = -0.22f;
+                cmd_drive = ADAS_CLIFF_BACK_DRIVE;
                 cmd_steer = 0.0f;
             } else if (s_cliff_retreat_active) {
-                uint32_t now_ms = HAL_GetTick();
                 if (!s_tof_available || !tof_is_valid()) {
-                    s_cliff_clear_timing = false;
-                    cmd_drive = -0.22f;
+                    cmd_drive = ADAS_CLIFF_BACK_DRIVE;
                     cmd_steer = 0.0f;
                 } else {
-                    if (!s_cliff_clear_timing) {
-                        s_cliff_clear_timing = true;
-                        s_cliff_clear_since_ms = now_ms;
-                    }
-
-                    if ((now_ms - s_cliff_clear_since_ms) < CLIFF_EXTRA_BACKUP_MS) {
-                        cmd_drive = -0.22f;
-                        cmd_steer = 0.0f;
-                    } else {
-                        s_cliff_retreat_active = false;
-                        s_cliff_clear_timing = false;
-                        cmd_drive = 0.0f;
-                        cmd_steer = 0.0f;
-                    }
+                    s_cliff_retreat_active = false;
+                    cmd_drive = 0.0f;
                 }
             }
 
-            bool avoidance_handled = false;
-            if ((s_avoid_state != AVOID_IDLE) || (cmd_drive > 0.05f)) {
-                avoidance_handled = app_update_avoidance(&cmd_drive,
-                                                          &cmd_steer,
-                                                          cliff_detected,
-                                                          raw_drive,
-                                                          raw_steer,
-                                                          pitch,
-                                                          HAL_GetTick());
-            } else {
-                app_reset_avoidance();
+            if (control_link_ok && cmd_drive > 0.0f) {
+                app_apply_adas_speed_limit(&cmd_drive, HAL_GetTick());
             }
 
-            if (!avoidance_handled && control_link_ok && cmd_drive > 0.05f) {
-                app_apply_driver_assist(&cmd_drive, &cmd_steer, HAL_GetTick());
-            }
+            fast_adas_drive_release = !cliff_control_active &&
+                                      (fabsf(cmd_drive) < fabsf(drive_before_adas));
         } else {
-            app_reset_avoidance();
             s_cliff_retreat_active = false;
-            s_cliff_clear_timing = false;
         }
 
         /* Tính toán cân bằng */
         cmd_drive = -cmd_drive;
         cmd_steer = -cmd_steer;
-        balance_update(pitch, gyro_rate, cmd_drive, cmd_steer, CONTROL_DT_S);
+        balance_update(pitch, gyro_rate, cmd_drive, cmd_steer, CONTROL_DT_S,
+                       fast_adas_drive_release);
 
         float left_spd = 0.0f;
         float right_spd = 0.0f;
@@ -681,12 +321,6 @@ void app_timer_control_tick(void)
     } else {
         stepper_stop();
         s_cliff_retreat_active = false;
-        s_cliff_clear_timing = false;
-        if ((s_avoid_state != AVOID_IDLE) &&
-            (sm_get_state() == STATE_DISARMED)) {
-            g_avoid_last_abort_reason = 5U;
-        }
-        app_reset_avoidance();
     }
 }
 

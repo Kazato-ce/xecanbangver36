@@ -21,8 +21,6 @@ void sm_init(void)
 
 void sm_update(float pitch_deg, bool radio_connected, bool arm_cmd, bool disarm_cmd, bool estop_cmd, uint32_t imu_errors)
 {
-    (void)radio_connected; /* Tự chủ cân bằng khi đặt xe xuống sàn */
-
     /* Emergency stop hoặc lệnh DISARM luôn được ưu tiên cao nhất */
     if (estop_cmd) {
         stepper_stop();
@@ -93,6 +91,13 @@ void sm_update(float pitch_deg, bool radio_connected, bool arm_cmd, bool disarm_
             break;
 
         case STATE_ARMED:
+            /* Không cho vòng ARM tiếp tục nhận chuyển động khi radio timeout.
+             * Việc ép drive/steer về 0 được thực hiện trong app.c;
+             * ở đây chỉ giữ máy trạng thái an toàn và không cho auto-recovery biến đổi thêm. */
+            if (!radio_connected) {
+                s_upright_stable_count = 0;
+            }
+
             /* Failsafe 1: Kiểm tra xe bị ngã (> 35 độ) -> NGẮT ĐỘNG CƠ NGAY LẬP TỨC */
             if (tilt_err > FALL_ANGLE_THRESHOLD_DEG) {
                 stepper_stop(); /* PA0 = HIGH: Tắt driver */

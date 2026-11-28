@@ -9,7 +9,7 @@ Dự án firmware và hệ thống điều khiển hoàn chỉnh cho xe 2 bánh 
 - **Trạm trung gian NRF24:** ESP32 DevKit V1 (`ESP32_DevKit_NRF24/`).
 - **Web Dashboard & PID Tuning:** ESP32 Super Mini (`ESP32_SuperMini_Web/`) giao tiếp UART (PA9/PA10).
 
-----
+---
 
 ## Cấu Trúc Thư Mục
 

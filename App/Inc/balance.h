@@ -6,7 +6,7 @@
 
 void balance_init(void);
 void balance_reset(void);
-void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float cmd_steer, float dt_s);
+void balance_update(float pitch_deg, float gyro_rate_dps, float cmd_drive, float cmd_steer, float dt_s, bool fast_drive_release);
 void balance_get_motor_speeds(float *left_steps_s, float *right_steps_s);
 
 /* Dynamic real-time PID tuning functions (e.g. from ESP32 Super Mini Web UI) */

@@ -8,15 +8,20 @@
 """
 
 import os
+import socket
+import struct
 import time
 import re
 import datetime
 import threading
 import traceback
+from collections import OrderedDict
 import tkinter as tk
 from tkinter import ttk, messagebox
+from urllib.parse import urlsplit
 
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 try:
@@ -60,6 +65,230 @@ DRIVE_REPEAT_MS = 100
 GAMEPAD_POLL_MS = 16
 GAMEPAD_RECONNECT_MS = 500
 GAMEPAD_DEADZONE = 0.12
+GAMEPAD_FULL_SCALE_ENTER = 0.90
+GAMEPAD_FULL_SCALE_EXIT = 0.85
+GAMEPAD_COMMAND_HYSTERESIS = 4
+FPV_PACKET_MAGIC = 0xAA55
+FPV_HEADER_FORMAT = "<HHBBH"
+FPV_HEADER_SIZE = struct.calcsize(FPV_HEADER_FORMAT)
+SERIAL_MAX_LINE_CHARS = 512
+
+
+def parse_dongle_status_line(line):
+    """Parse normalized Dongle STATE/EVT lines; reject malformed fields."""
+    if line.startswith("STATE:"):
+        parts = line[len("STATE:"):].split(",")
+        fields = {}
+        for part in parts:
+            key, separator, value = part.partition("=")
+            if not separator or not key or key in fields:
+                raise ValueError("Malformed STATE field")
+            fields[key] = value
+
+        required = {"MODE", "ADAS", "SRC", "DRIVE", "STEER", "LINK"}
+        if not required.issubset(fields):
+            raise ValueError("STATE line is missing required fields")
+
+        mode = fields["MODE"]
+        source = fields["SRC"]
+        if mode not in {"ARMED", "DISARMED", "ESTOP"}:
+            raise ValueError("Unknown Dongle mode")
+        if source not in {"JOYSTICK", "GCS_PC", "IDLE"}:
+            raise ValueError("Unknown control source")
+        if fields["ADAS"] not in {"0", "1"} or fields["LINK"] not in {"0", "1"}:
+            raise ValueError("Invalid Dongle boolean field")
+
+        drive = int(fields["DRIVE"])
+        steer = int(fields["STEER"])
+        if not -1000 <= drive <= 1000 or not -1000 <= steer <= 1000:
+            raise ValueError("Dongle command is out of range")
+
+        return {
+            "type": "STATE",
+            "mode": mode,
+            "adas": fields["ADAS"] == "1",
+            "source": source,
+            "drive": drive,
+            "steer": steer,
+            "link": fields["LINK"] == "1",
+        }
+
+    if line.startswith("EVT:"):
+        event, separator, value = line[len("EVT:"):].partition("=")
+        if not separator or not value:
+            raise ValueError("Malformed EVT line")
+        if event == "STATE" and value in {"ARMED", "DISARMED", "ESTOP"}:
+            return {"type": "EVT", "event": event, "value": value}
+        if event == "ADAS" and value in {"0", "1"}:
+            return {"type": "EVT", "event": event, "value": value == "1"}
+        if event == "SRC" and value in {"JOYSTICK", "GCS_PC", "IDLE"}:
+            return {"type": "EVT", "event": event, "value": value}
+        raise ValueError("Unknown or invalid Dongle event")
+
+    return None
+
+
+class UdpFpvWorker(threading.Thread):
+    """Receive and reassemble JPEG frames sent by cam_fpv_stream.py."""
+
+    def __init__(self, source_url, on_frame, on_status):
+        super().__init__(daemon=True)
+        self.source_url = source_url.strip()
+        self.on_frame = on_frame
+        self.on_status = on_status
+        self.running = False
+        self._stop_event = threading.Event()
+        self._socket_lock = threading.Lock()
+        self._socket = None
+
+    def stop(self):
+        self._stop_event.set()
+        with self._socket_lock:
+            sock = self._socket
+            self._socket = None
+        if sock is not None:
+            sock.close()
+
+    def _port_from_url(self):
+        parsed = urlsplit(self.source_url)
+        if parsed.scheme.lower() != "udp":
+            raise ValueError("URL UDP phải có dạng udp://0.0.0.0:8888")
+
+        port = parsed.port
+        if port is None and parsed.netloc.isdigit():
+            port = int(parsed.netloc)
+        if port is None or not 1 <= port <= 65535:
+            raise ValueError("Port UDP phải nằm trong khoảng 1 đến 65535")
+        return port
+
+    def run(self):
+        self.running = True
+        sock = None
+        try:
+            port = self._port_from_url()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            with self._socket_lock:
+                if self._stop_event.is_set():
+                    sock.close()
+                    return
+                self._socket = sock
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
+            sock.settimeout(0.1)
+            sock.bind(("0.0.0.0", port))
+            self.on_status(f"Đang lắng nghe FPV UDP tại cổng {port}...", False)
+
+            frames = OrderedDict()
+            last_packet_time = time.monotonic()
+            signal_lost = False
+            last_completed_frame_id = None
+            drop_count = 0
+            fps = 0.0
+            fps_frames = 0
+            fps_started = time.monotonic()
+
+            while not self._stop_event.is_set():
+                try:
+                    packet, _address = sock.recvfrom(65535)
+                except socket.timeout:
+                    if (
+                        not signal_lost
+                        and time.monotonic() - last_packet_time > 1.5
+                    ):
+                        signal_lost = True
+                        self.on_status("Mất tín hiệu FPV UDP (quá 1.5 giây không có gói tin).", False)
+                    continue
+                except OSError:
+                    if self._stop_event.is_set():
+                        break
+                    raise
+
+                if len(packet) < FPV_HEADER_SIZE:
+                    continue
+
+                magic, frame_id, chunk_idx, total_chunks, chunk_len = struct.unpack(
+                    FPV_HEADER_FORMAT, packet[:FPV_HEADER_SIZE]
+                )
+                if (
+                    magic != FPV_PACKET_MAGIC
+                    or total_chunks == 0
+                    or chunk_idx >= total_chunks
+                    or len(packet) < FPV_HEADER_SIZE + chunk_len
+                ):
+                    continue
+
+                packet_time = time.monotonic()
+                if (
+                    not signal_lost
+                    and packet_time - last_packet_time > 1.5
+                ):
+                    signal_lost = True
+                    self.on_status(
+                        "Mất tín hiệu FPV UDP (quá 1.5 giây không có gói tin).",
+                        False,
+                    )
+                last_packet_time = packet_time
+                if signal_lost:
+                    signal_lost = False
+                    self.on_status("Đã nhận lại tín hiệu FPV UDP.", True)
+
+                frame_entry = frames.get(frame_id)
+                if frame_entry is None or frame_entry[0] != total_chunks:
+                    frames[frame_id] = (total_chunks, {})
+                    frame_entry = frames[frame_id]
+                chunks = frame_entry[1]
+                chunks.setdefault(
+                    chunk_idx,
+                    packet[FPV_HEADER_SIZE:FPV_HEADER_SIZE + chunk_len],
+                )
+                frames.move_to_end(frame_id)
+                while len(frames) > 8:
+                    frames.popitem(last=False)
+
+                if len(chunks) != total_chunks:
+                    continue
+
+                jpg_bytes = b"".join(chunks[index] for index in range(total_chunks))
+                del frames[frame_id]
+
+                if last_completed_frame_id is not None:
+                    frame_delta = (frame_id - last_completed_frame_id) & 0xFFFF
+                    if frame_delta == 0 or frame_delta >= 0x8000:
+                        continue
+                    drop_count += max(0, frame_delta - 1)
+
+                last_completed_frame_id = frame_id
+                try:
+                    frame = cv2.imdecode(
+                        np.frombuffer(jpg_bytes, dtype=np.uint8),
+                        cv2.IMREAD_COLOR,
+                    )
+                except cv2.error:
+                    drop_count += 1
+                    continue
+                if frame is None:
+                    drop_count += 1
+                    continue
+
+                fps_frames += 1
+                now = time.monotonic()
+                elapsed = now - fps_started
+                if elapsed >= 1.0:
+                    fps = fps_frames / elapsed
+                    fps_frames = 0
+                    fps_started = now
+                self.on_frame(frame, fps, drop_count)
+        except (OSError, ValueError) as exc:
+            if not self._stop_event.is_set():
+                self.on_status(f"Lỗi nhận FPV UDP: {exc}", False)
+        finally:
+            with self._socket_lock:
+                active_socket = self._socket
+                self._socket = None
+            if active_socket is not None:
+                active_socket.close()
+            elif sock is not None:
+                sock.close()
+            self.running = False
 
 
 class GroundStationApp:
@@ -76,13 +305,22 @@ class GroundStationApp:
         self.serial_running = False
         self.last_connected_port = None
         self.adas_enabled = False
-        self.adas_enabled = True
+        self.dongle_mode = None
+        self.armed = False
+        self.estop = False
+        self._drive_inhibited = True
+        self._stop_command_pending = False
+        self.active_source = "IDLE"
+        self.actual_drive = 0
+        self.actual_steer = 0
+        self.rf_link_ok = None
         self.auto_reconnect_var = tk.BooleanVar(value=True)
         self.auto_reconnecting = False
         self._last_reconnect_attempt_ms = 0
         self._last_drive_tx_ms = 0
         self._active_drive_inputs = {}
         self._pressed_keys = set()
+        self._window_has_focus = True
         self._stop_input_active = False
         self._drive_axis_active = {"drive": False, "steer": False}
         self._drive_axis_started_at = {"drive": None, "steer": None}
@@ -101,8 +339,8 @@ class GroundStationApp:
         self.gamepad_drive_baseline = 0.0
         self.gamepad_steer_baseline = 0.0
         self.gamepad_baseline_ready = False
-        self.gamepad_last_drive = None
-        self.gamepad_last_steer = None
+        self.gamepad_drive_full_scale = False
+        self.gamepad_steer_full_scale = False
         self._gamepad_poll_after_id = None
         self._hand_preview_error_reported = False
         self._control_limits_lock = threading.Lock()
@@ -110,9 +348,14 @@ class GroundStationApp:
 
         # Trạng thái Video FPV (ESP32-S3 CAM)
         self.video_worker = None
+        self._video_generation = 0
         self.current_frame = None
         self.photo_img = None
         self.fps_display = 0.0
+        self.drop_display = 0
+        self._frame_lock = threading.Lock()
+        self._frame_dirty = False
+        self._video_render_error_reported = False
 
         # Trạng thái Webcam lái tay (MediaPipe)
         self.hand_worker = None
@@ -167,7 +410,7 @@ class GroundStationApp:
 
         tk.Label(
             header,
-            text="⚡ STM32F405 SELF-BALANCING ROBOT — FPV & GESTURE GCS",
+            text="Nhóm 1 Software diều khiển xe tự cân bằng",
             font=("Segoe UI", 13, "bold"),
             fg=THEME["primary"],
             bg=THEME["panel"]
@@ -213,7 +456,7 @@ class GroundStationApp:
     def _build_video_panel(self, parent):
         card = tk.LabelFrame(
             parent,
-            text=" 📹 ESP32-S3 CAM — Góc Nhìn Thứ Nhất (FPV Stream) ",
+            text=" FPV Stream",
             font=("Segoe UI", 11, "bold"),
             fg=THEME["primary"],
             bg=THEME["card"],
@@ -232,6 +475,7 @@ class GroundStationApp:
         self.cb_stream_url = ttk.Combobox(
             url_frame,
             values=[
+                "udp://0.0.0.0:8888",
                 "http://192.168.4.1:81/stream",
                 "http://172.20.10.8:81/stream",
                 "http://192.168.4.2:81/stream",
@@ -241,8 +485,12 @@ class GroundStationApp:
             width=34,
             font=("Consolas", 9)
         )
-        self.cb_stream_url.set("http://192.168.4.1:81/stream")
+        self.cb_stream_url.set("udp://0.0.0.0:8888")
         self.cb_stream_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.cb_stream_url.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.root.focus_set(),
+        )
 
         self.btn_toggle_stream = tk.Button(
             url_frame,
@@ -278,6 +526,7 @@ class GroundStationApp:
         )
         self.video_canvas.pack(fill=tk.BOTH, expand=True)
         self.video_canvas.bind("<Configure>", self._on_canvas_resize)
+        self.video_canvas.bind("<Button-1>", lambda _event: self.root.focus_set())
 
         self._draw_video_placeholder("Chưa mở FPV từ ESP32-S3 CAM\nNhập IP:81/stream và bấm 'MỞ FPV'")
 
@@ -295,7 +544,7 @@ class GroundStationApp:
 
         self.lbl_fps = tk.Label(
             info_bar,
-            text="FPS: 0.0 | Độ phân giải: --x--",
+            text="FPS: 0.0 | Drop: 0 | Độ phân giải: --x--",
             font=("Consolas", 9),
             fg=THEME["subtext"],
             bg=THEME["card_alt"]
@@ -317,9 +566,14 @@ class GroundStationApp:
     def _on_canvas_resize(self, event):
         if self.video_worker is None or not self.video_worker.running:
             self._draw_video_placeholder("Chưa mở FPV từ ESP32-S3 CAM\nNhập IP:81/stream và bấm 'MỞ FPV'")
+        else:
+            with self._frame_lock:
+                self._frame_dirty = self.current_frame is not None
 
     def toggle_video_stream(self):
-        if self.video_worker and self.video_worker.running:
+        if self.video_worker and (
+            self.video_worker.running or self.video_worker.is_alive()
+        ):
             self.stop_video_stream()
         else:
             self.start_video_stream()
@@ -327,35 +581,70 @@ class GroundStationApp:
     def start_video_stream(self):
         url = self.cb_stream_url.get().strip()
         if not url:
-            messagebox.showwarning("Cảnh báo", "Vui lòng nhập URL Stream của ESP32-S3 CAM!")
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập URL/địa chỉ FPV!")
+            return
+
+        self._video_generation += 1
+        generation = self._video_generation
+        if url.lower().startswith("udp://"):
+            self.video_worker = UdpFpvWorker(
+                source_url=url,
+                on_frame=lambda frame, fps, drop: self._on_video_frame(
+                    frame, fps, drop, generation
+                ),
+                on_status=lambda msg, is_ok: self._on_video_status(
+                    msg, is_ok, generation
+                ),
+            )
+        elif url.lower().startswith(("http://", "https://")) or url.isdigit():
+            self.video_worker = VideoStreamWorker(
+                source_url=url,
+                on_frame=lambda frame, fps: self._on_video_frame(
+                    frame, fps, 0, generation
+                ),
+                on_status=lambda msg, is_ok: self._on_video_status(
+                    msg, is_ok, generation
+                ),
+            )
+        else:
+            messagebox.showwarning(
+                "URL không hợp lệ",
+                "Chỉ hỗ trợ udp://... , http://... , https://... hoặc chỉ số webcam.",
+            )
             return
 
         self.btn_toggle_stream.config(text="⏹ DỪNG FPV", bg=THEME["danger"])
         self.lbl_stream_status.config(text="● ĐANG KẾT NỐI FPV...", fg=THEME["warning"])
-
-        self.video_worker = VideoStreamWorker(
-            source_url=url,
-            on_frame=self._on_video_frame,
-            on_status=self._on_video_status
-        )
         self.video_worker.start()
 
     def stop_video_stream(self):
+        self._video_generation += 1
         if self.video_worker:
             self.video_worker.stop()
             self.video_worker = None
-        self.current_frame = None
+        with self._frame_lock:
+            self.current_frame = None
+            self._frame_dirty = False
+            self.fps_display = 0.0
+            self.drop_display = 0
         self.btn_toggle_stream.config(text="▶ MỞ FPV", bg=THEME["primary"])
         self.lbl_stream_status.config(text="● FPV ĐÃ DỪNG", fg=THEME["subtext"])
-        self.lbl_fps.config(text="FPS: 0.0 | Độ phân giải: --x--")
+        self.lbl_fps.config(text="FPS: 0.0 | Drop: 0 | Độ phân giải: --x--")
         self._draw_video_placeholder("FPV đã dừng.\nBấm 'MỞ FPV' để kết nối lại.")
 
-    def _on_video_frame(self, frame_bgr, fps):
-        self.current_frame = frame_bgr
-        self.fps_display = fps
+    def _on_video_frame(self, frame_bgr, fps, drop=0, generation=None):
+        if generation is not None and generation != self._video_generation:
+            return
+        with self._frame_lock:
+            self.current_frame = frame_bgr
+            self.fps_display = fps
+            self.drop_display = drop
+            self._frame_dirty = True
 
-    def _on_video_status(self, msg, is_ok):
+    def _on_video_status(self, msg, is_ok, generation=None):
         def _update():
+            if generation is not None and generation != self._video_generation:
+                return
             if is_ok:
                 self.lbl_stream_status.config(text="● FPV LIVE", fg=THEME["success"])
             else:
@@ -363,7 +652,9 @@ class GroundStationApp:
         self.root.after(0, _update)
 
     def save_snapshot(self):
-        if self.current_frame is None:
+        with self._frame_lock:
+            frame = self.current_frame
+        if frame is None:
             messagebox.showinfo("Thông báo", "Chưa có khung hình FPV nào để lưu!")
             return
 
@@ -372,7 +663,9 @@ class GroundStationApp:
         fname = datetime.datetime.now().strftime("fpv_%Y%m%d_%H%M%S.png")
         path = os.path.join(snap_dir, fname)
 
-        cv2.imwrite(path, self.current_frame)
+        if not cv2.imwrite(path, frame):
+            self.log_console(f"[FPV Lỗi] Không lưu được ảnh snapshot: {path}", "ERROR")
+            return
         self.log_console(f"[FPV] Đã lưu ảnh chụp: {fname}", "INFO")
         messagebox.showinfo("Thành công", f"Đã lưu ảnh snapshot vào:\n{path}")
 
@@ -400,6 +693,10 @@ class GroundStationApp:
 
         self.cb_com_ports = ttk.Combobox(row, width=22, state="readonly")
         self.cb_com_ports.pack(side=tk.LEFT, padx=6)
+        self.cb_com_ports.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.root.focus_set(),
+        )
 
         tk.Button(
             row, text="🔄 Quét", bg=THEME["card_alt"], fg=THEME["text"],
@@ -482,37 +779,24 @@ class GroundStationApp:
         )
         self.lbl_vehicle_state.pack(side=tk.RIGHT)
 
-    def ping_robot(self):
-        if not self.serial_running or not self.serial_client:
-            self.log_console("[Ping] Chưa kết nối cổng COM của ESP32!", "WARN")
-            return
-        self.send_serial_cmd("PING")
-        self.log_console("[Ping] Đã gửi lệnh PING kiểm tra sóng sang ESP32 DevKit...", "INFO")
-
-    def refresh_com_ports(self):
-        details = get_port_details()
-        labels = [d["label"] for d in details]
-        self.cb_com_ports["values"] = labels
-
-        best_idx = 0
-        for i, d in enumerate(details):
-            if d.get("is_esp"):
-                best_idx = i
-                break
-
-        if labels:
-            self.cb_com_ports.current(best_idx)
-        self.log_console(f"[Serial] Tìm thấy {len(details)} cổng COM. Tự chọn: {labels[best_idx] if labels else 'Không có'}", "INFO")
-
-    def auto_connect_esp32(self):
-        self.refresh_com_ports()
-        port = find_best_esp32_port()
-        if not port:
-            messagebox.showinfo("Tìm cổng COM", "Chưa tìm thấy cổng COM nào cắm vào máy tính!")
-            return
-        self.log_console(f"[Auto-Connect] Đang tự động kết nối cổng: {port}...", "INFO")
-        self.connect_serial(target_port=port)
-
+        detail_row = tk.Frame(card, bg=THEME["card"])
+        detail_row.pack(fill=tk.X, pady=(4, 0))
+        self.lbl_control_source = tk.Label(
+            detail_row,
+            text="Nguồn lái: IDLE",
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
+        )
+        self.lbl_control_source.pack(side=tk.LEFT)
+        self.lbl_actual_command = tk.Label(
+            detail_row,
+            text="Lệnh Dongle: DRIVE 0 | STEER 0",
+            font=("Consolas", 8),
+            fg=THEME["subtext"],
+            bg=THEME["card"]
+        )
+        self.lbl_actual_command.pack(side=tk.RIGHT)
 
     def ping_robot(self):
         if not self.serial_running or not self.serial_client:
@@ -564,6 +848,16 @@ class GroundStationApp:
             self.serial_client.open()
             self.serial_running = True
             self.last_connected_port = target_port
+            self.dongle_mode = None
+            self.armed = False
+            self.estop = False
+            self._drive_inhibited = True
+            self._stop_command_pending = False
+            self.active_source = "IDLE"
+            self.rf_link_ok = None
+            self.robot_state_str = "ĐANG ĐỒNG BỘ..."
+            self._update_vehicle_state_widget()
+            self._update_dongle_status_widgets()
 
             self.btn_connect.config(text="NGẮT KẾT NỐI", bg=THEME["danger"], fg="#ffffff")
             self.lbl_serial_badge.config(text=f"● Đã kết nối: {target_port} @ 115200", fg=THEME["success"])
@@ -571,13 +865,8 @@ class GroundStationApp:
 
             self.serial_thread = threading.Thread(target=self._serial_reader_loop, daemon=True)
             self.serial_thread.start()
-            self._set_adas_state(False)
-            self._send_adas_state(log_state=True)
-            self.cmd_arm()
-            self.robot_state_str = "ARMED"
-            self._update_vehicle_state_widget()
-            self.log_console("[ARM] Đã gửi lệnh ARM mặc định sau khi kết nối.", "SUCCESS")
-            self._send_adas_state(log_state=True)
+            self.send_serial_cmd("SYNC")
+            self.log_console("[Serial] Đã yêu cầu đồng bộ trạng thái Dongle (SYNC).", "INFO")
 
             self.root.after(300, self.ping_robot)
             return True
@@ -592,9 +881,22 @@ class GroundStationApp:
 
     def disconnect_serial(self, is_unexpected=False):
         self.serial_running = False
+        self._clear_pc_drive_inputs()
         if self.serial_client:
             self.serial_client.close()
             self.serial_client = None
+        self.dongle_mode = None
+        self.armed = False
+        self.estop = False
+        self._drive_inhibited = True
+        self._stop_command_pending = False
+        self.active_source = "IDLE"
+        self.actual_drive = 0
+        self.actual_steer = 0
+        self.rf_link_ok = None
+        self.robot_state_str = "CHƯA CÓ TRẠNG THÁI"
+        self._update_vehicle_state_widget()
+        self._update_dongle_status_widgets()
 
         self.btn_connect.config(text="KẾT NỐI", bg=THEME["success"], fg="#11111b")
         if is_unexpected:
@@ -618,15 +920,34 @@ class GroundStationApp:
                         if line:
                             self.rx_count += 1
                             self.root.after(0, self._process_rx_line, line)
+                    if len(buffer) > SERIAL_MAX_LINE_CHARS:
+                        buffer = ""
+                        self.root.after(0, self.log_console,
+                                        "[Serial] Bỏ qua dữ liệu RX không có newline hoặc quá dài.", "WARN")
                 else:
                     time.sleep(0.005)
             except Exception:
                 if self.serial_running:
-                    self.root.after(0, lambda: self.disconnect_serial(is_unexpected=True))
+                    try:
+                        self.root.after(0, lambda: self.disconnect_serial(is_unexpected=True))
+                    except tk.TclError:
+                        pass
                 break
 
     def _process_rx_line(self, line):
         self.log_console(f"RX: {line}", "RX")
+
+        try:
+            status = parse_dongle_status_line(line)
+        except (TypeError, ValueError) as exc:
+            if line.startswith(("STATE:", "EVT:")):
+                self.log_console(f"[Serial] Bản tin trạng thái không hợp lệ: {exc}", "WARN")
+                return
+            status = None
+
+        if status:
+            self._apply_dongle_status(status)
+            return
 
         if "TX 1-CHIỀU" in line or "1-WAY-TX" in line:
             self.diag_nrf_ok = True
@@ -638,23 +959,24 @@ class GroundStationApp:
             self.diag_nrf_ok = False
             self.lbl_rf_link.config(text="● SÓNG NRF: ĐANG TÌM XE", fg=THEME["warning"])
         elif "ACK: ARM" in line:
-            self.robot_state_str = "ARMED"
-            self._update_vehicle_state_widget()
+            self._set_dongle_mode("ARMED")
         elif "ACK: DISARM" in line:
-            self.robot_state_str = "DISARMED"
-            self._update_vehicle_state_widget()
+            self._set_dongle_mode("DISARMED")
         elif "ACK: ESTOP" in line:
-            self.robot_state_str = "FAULT"
-            self._update_vehicle_state_widget()
+            self._set_dongle_mode("ESTOP")
         elif "ACK: ADAS ON" in line:
             self._set_adas_state(True)
         elif "ACK: ADAS OFF" in line:
             self._set_adas_state(False)
         elif "PONG:" in line:
             if "RADIO_OK=1" in line:
-                self.lbl_rf_link.config(text="● NRF24 ESP32: SẴN SÀNG", fg=THEME["primary"])
+                self.diag_nrf_ok = True
+                if self.rf_link_ok is None:
+                    self.lbl_rf_link.config(text="● NRF24 Dongle: SẴN SÀNG; chờ LINK xe", fg=THEME["primary"])
             else:
-                self.lbl_rf_link.config(text="● NRF24: LỖI PHẦN CỨNG", fg=THEME["danger"])
+                self.diag_nrf_ok = False
+                if self.rf_link_ok is None:
+                    self.lbl_rf_link.config(text="● NRF24 Dongle: LỖI PHẦN CỨNG", fg=THEME["danger"])
 
         adas_match = re.search(r'"adas"\s*:\s*(true|false)', line, re.IGNORECASE)
         if adas_match:
@@ -708,10 +1030,94 @@ class GroundStationApp:
 
             self._update_vehicle_state_widget()
 
+    def _apply_dongle_status(self, status):
+        if status["type"] == "STATE":
+            self._set_dongle_mode(status["mode"])
+            self._set_adas_state(status["adas"])
+            self._set_active_source(status["source"])
+            self.actual_drive = status["drive"]
+            self.actual_steer = status["steer"]
+            self.rf_link_ok = status["link"]
+            self._update_dongle_status_widgets()
+            return
+
+        if status["event"] == "STATE":
+            self._set_dongle_mode(status["value"])
+        elif status["event"] == "ADAS":
+            self._set_adas_state(status["value"])
+        elif status["event"] == "SRC":
+            self._set_active_source(status["value"])
+        self._update_dongle_status_widgets()
+
+    def _clear_pc_drive_inputs(self):
+        self._cancel_drive_timers()
+        self._active_drive_inputs.clear()
+        self._reset_drive_axis_state()
+        self._pressed_keys.difference_update({"w", "a", "s", "d"})
+        self._stop_input_active = False
+        self.drive_cmd = 0
+        self.steer_cmd = 0
+        self.gamepad_last_drive = 0
+        self.gamepad_last_steer = 0
+        self._hand_was_active = False
+
+    def _set_dongle_mode(self, mode):
+        changed = mode != self.dongle_mode
+        self.dongle_mode = mode
+        self.armed = mode == "ARMED"
+        self.estop = mode == "ESTOP"
+        if self.armed:
+            if not self._stop_command_pending:
+                self._drive_inhibited = False
+        else:
+            self._drive_inhibited = True
+            self._stop_command_pending = False
+        self.robot_state_str = mode
+        if changed or not self.armed:
+            self._clear_pc_drive_inputs()
+        self._update_vehicle_state_widget()
+
+    def _set_active_source(self, source):
+        changed = source != self.active_source
+        self.active_source = source
+        if source == "JOYSTICK" and changed:
+            self._clear_pc_drive_inputs()
+            self.log_console("[Điều khiển] Tay cầm vật lý đang ưu tiên; lệnh DRIVE từ GCS bị khóa.", "WARN")
+        self._update_dongle_status_widgets()
+
+    def _update_dongle_status_widgets(self):
+        if not hasattr(self, "lbl_control_source"):
+            return
+
+        source_text = {
+            "JOYSTICK": "JOYSTICK (ƯU TIÊN TAY CẦM)",
+            "GCS_PC": "GCS_PC",
+            "IDLE": "IDLE",
+        }.get(self.active_source, self.active_source)
+        source_color = (
+            THEME["warning"] if self.active_source == "JOYSTICK"
+            else THEME["success"] if self.active_source == "GCS_PC"
+            else THEME["subtext"]
+        )
+        self.lbl_control_source.config(text=f"Nguồn lái: {source_text}", fg=source_color)
+        self.lbl_actual_command.config(
+            text=f"Lệnh Dongle: DRIVE {self.actual_drive} | STEER {self.actual_steer}"
+        )
+
+        if self.rf_link_ok is True:
+            self.lbl_rf_link.config(text="● LINK NRF24 → STM32: OK", fg=THEME["success"])
+        elif self.rf_link_ok is False:
+            self.lbl_rf_link.config(text="● LINK NRF24 → STM32: MẤT", fg=THEME["danger"])
+        elif self.serial_running:
+            self.lbl_rf_link.config(text="● LINK NRF24 → STM32: ĐANG ĐỒNG BỘ", fg=THEME["warning"])
+        else:
+            self.lbl_rf_link.config(text="● LINK NRF24 → STM32: CHƯA KẾT NỐI", fg=THEME["subtext"])
+
     def _update_vehicle_state_widget(self):
         st_colors = {
             "ARMED": THEME["success"],
             "DISARMED": THEME["warning"],
+            "ESTOP": THEME["danger"],
             "CALIBRATING": THEME["accent"],
             "BOOT": THEME["primary"],
             "FAULT": THEME["danger"],
@@ -945,8 +1351,32 @@ class GroundStationApp:
         self.gamepad_drive_baseline = 0.0
         self.gamepad_steer_baseline = 0.0
         self.gamepad_baseline_ready = False
-        self.gamepad_last_drive = None
-        self.gamepad_last_steer = None
+        self.gamepad_drive_full_scale = False
+        self.gamepad_steer_full_scale = False
+
+    def _gamepad_axis_to_command(self, axis_name, axis_value, command_limit):
+        state_name = f"gamepad_{axis_name}_full_scale"
+        full_scale = getattr(self, state_name)
+        magnitude = abs(axis_value)
+
+        if full_scale:
+            if magnitude <= GAMEPAD_FULL_SCALE_EXIT:
+                full_scale = False
+        elif magnitude >= GAMEPAD_FULL_SCALE_ENTER:
+            full_scale = True
+        setattr(self, state_name, full_scale)
+
+        if full_scale:
+            return command_limit if axis_value >= 0.0 else -command_limit
+
+        command = int(round(axis_value * command_limit))
+        last_command = (
+            self.gamepad_last_drive if axis_name == "drive"
+            else self.gamepad_last_steer
+        )
+        if abs(command - last_command) <= GAMEPAD_COMMAND_HYSTERESIS:
+            return last_command
+        return command
 
     def _handle_gamepad_disconnect(self):
         self.gamepad_enabled = False
@@ -998,6 +1428,8 @@ class GroundStationApp:
                 self.gamepad_ignore_button_edges = True
                 self.gamepad_last_drive = 0
                 self.gamepad_last_steer = 0
+                self.gamepad_drive_full_scale = False
+                self.gamepad_steer_full_scale = False
                 self.gamepad_last_tx_ms = 0.0
                 axis_count = self.gamepad.get_numaxes()
                 baseline_drive = -self.gamepad.get_axis(1) if axis_count > 1 else 0.0
@@ -1005,9 +1437,6 @@ class GroundStationApp:
                 self.gamepad_drive_baseline = baseline_drive
                 self.gamepad_steer_baseline = baseline_steer
                 self.gamepad_baseline_ready = True
-                self.gamepad_last_drive = None
-                self.gamepad_last_steer = None
-                self.gamepad_last_tx_ms = 0.0
                 name = self.gamepad.get_name()
                 self.lbl_gamepad_status.config(text=f"Đã kết nối: {name} | Trục Y trái: tiến/lùi, trục X phải: rẽ", fg=THEME["success"])
                 self.log_console(f"[Gamepad] Đã kết nối tay cầm USB: {name}", "SUCCESS")
@@ -1059,16 +1488,24 @@ class GroundStationApp:
                 steer_delta = max(-1.0, min(1.0, steer_delta))
                 drive_axis = drive_delta if abs(drive_delta) >= GAMEPAD_DEADZONE else 0.0
                 steer_axis = steer_delta if abs(steer_delta) >= GAMEPAD_DEADZONE else 0.0
-                drive_axis = -self.gamepad.get_axis(1) if axis_count > 1 else 0.0
-                steer_axis = self.gamepad.get_axis(2) if axis_count > 2 else 0.0
                 if abs(drive_axis) < GAMEPAD_DEADZONE:
                     drive_axis = 0.0
                 if abs(steer_axis) < GAMEPAD_DEADZONE:
                     steer_axis = 0.0
-                drive_cmd = int(round(drive_axis * int(self.slider_speed_step.get())))
-                steer_cmd = int(round(steer_axis * int(self.slider_steer_step.get())))
+                drive_cmd = self._gamepad_axis_to_command(
+                    "drive", drive_axis, int(self.slider_speed_step.get())
+                )
+                steer_cmd = self._gamepad_axis_to_command(
+                    "steer", steer_axis, int(self.slider_steer_step.get())
+                )
 
             if self.robot_state_str != "ARMED":
+                drive_cmd = 0
+                steer_cmd = 0
+            if not self._window_has_focus:
+                drive_cmd = 0
+                steer_cmd = 0
+            if not self._pc_drive_allowed():
                 drive_cmd = 0
                 steer_cmd = 0
 
@@ -1084,10 +1521,6 @@ class GroundStationApp:
                 self.drive_cmd = drive_cmd
                 self.steer_cmd = steer_cmd
                 if self.serial_running and (gamepad_active or changed):
-            if changed or (now_ms - self.gamepad_last_tx_ms) >= DRIVE_REPEAT_MS:
-                self.drive_cmd = drive_cmd
-                self.steer_cmd = steer_cmd
-                if self.serial_running:
                     self.send_serial_cmd(f"DRIVE {drive_cmd} {steer_cmd}")
                 self.gamepad_last_drive = drive_cmd
                 self.gamepad_last_steer = steer_cmd
@@ -1169,16 +1602,31 @@ class GroundStationApp:
     def _on_hand_control(self, drive_val, steer_val, hand_found):
         if not self.hand_mode_enabled:
             return
+        self.root.after(
+            0,
+            self._apply_hand_control,
+            drive_val,
+            steer_val,
+            hand_found,
+        )
+
+    def _apply_hand_control(self, drive_val, steer_val, hand_found):
+        if not self.hand_mode_enabled or not self._window_has_focus:
+            return
+        if not self._pc_drive_allowed():
+            return
         if self._stop_input_active:
+            return
+        if self._pressed_keys.intersection({"w", "a", "s", "d"}):
             return
         if hand_found:
             self._hand_was_active = True
             self.drive_cmd = drive_val
             self.steer_cmd = steer_val
-            self.root.after(0, self._dispatch_drive)
+            self._dispatch_drive()
         elif self._hand_was_active:
             self._hand_was_active = False
-            self.root.after(0, self.cmd_stop)
+            self.cmd_stop()
 
     # ──────────────────────────────────────────────────────────────────────────
     # BÀN PHÍM AN TOÀN (KHÔNG KÍCH HOẠT NHẦM KHI GÕ VĂN BẢN)
@@ -1196,14 +1644,52 @@ class GroundStationApp:
         )
 
     def _bind_keyboard_controls(self):
-        self.root.bind("<KeyPress>", self._on_key_press)
-        self.root.bind("<KeyRelease>", self._on_key_release)
+        self.root.bind_all("<KeyPress>", self._on_key_press)
+        self.root.bind_all("<KeyRelease>", self._on_key_release)
+        self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
+        self.root.bind("<FocusOut>", self._on_root_focus_out, add="+")
+
+    def _on_root_focus_in(self, _event):
+        self._window_has_focus = True
+
+    def _on_root_focus_out(self, _event):
+        self.root.after_idle(self._clear_drive_on_focus_loss)
+
+    def _clear_drive_on_focus_loss(self):
+        try:
+            focused_widget = self.root.focus_displayof()
+            if (
+                focused_widget is not None
+                and focused_widget.winfo_toplevel() == self.root
+            ):
+                return
+        except tk.TclError:
+            pass
+
+        if not self._window_has_focus:
+            return
+        self._window_has_focus = False
+        self._pressed_keys.clear()
+        self._active_drive_inputs.clear()
+        self._stop_input_active = False
+        self.cmd_stop()
 
     def _on_key_press(self, event):
         if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
             return
 
-        key = event.keysym.lower()
+        keysym = str(event.keysym).lower()
+        try:
+            keycode = int(event.keycode)
+        except (AttributeError, TypeError, ValueError):
+            keycode = None
+        physical_key = {
+            87: "w",
+            65: "a",
+            83: "s",
+            68: "d",
+        }.get(keycode)
+        key = physical_key or keysym
         if key in self._pressed_keys:
             return
         self._pressed_keys.add(key)
@@ -1228,7 +1714,18 @@ class GroundStationApp:
             self.toggle_adas()
 
     def _on_key_release(self, event):
-        key = event.keysym.lower()
+        keysym = str(event.keysym).lower()
+        try:
+            keycode = int(event.keycode)
+        except (AttributeError, TypeError, ValueError):
+            keycode = None
+        physical_key = {
+            87: "w",
+            65: "a",
+            83: "s",
+            68: "d",
+        }.get(keycode)
+        key = physical_key or keysym
         self._pressed_keys.discard(key)
         if key in ("w", "s", "a", "d"):
             self._release_drive_input(f"key:{key}")
@@ -1238,32 +1735,35 @@ class GroundStationApp:
     def send_serial_cmd(self, cmd_text):
         if not self.serial_client or not self.serial_client.is_open:
             self.log_console("[Lỗi gửi] Chưa kết nối ESP32 DevKit V1!", "WARN")
-            return
+            return False
+        if re.match(r"^DRIVE(?:\s|$)", cmd_text.strip(), re.IGNORECASE):
+            if not self._pc_drive_allowed():
+                return False
         try:
             self.serial_client.write_line(cmd_text)
             self.tx_count += 1
             self.log_console(f"TX: {cmd_text}", "TX")
+            return True
         except Exception as e:
             self.log_console(f"[Lỗi gửi Serial] {e}", "ERROR")
             self.disconnect_serial(is_unexpected=True)
+            return False
 
     def cmd_arm(self):
+        self._stop_command_pending = False
+        self._drive_inhibited = True
         self.send_serial_cmd("ARM")
 
     def cmd_disarm(self):
-        self._cancel_drive_timers()
-        self._active_drive_inputs.clear()
-        self._reset_drive_axis_state()
-        self.drive_cmd = 0
-        self.steer_cmd = 0
+        self._stop_command_pending = True
+        self._drive_inhibited = True
+        self._clear_pc_drive_inputs()
         self.send_serial_cmd("DISARM")
 
     def cmd_estop(self):
-        self._cancel_drive_timers()
-        self._active_drive_inputs.clear()
-        self._reset_drive_axis_state()
-        self.drive_cmd = 0
-        self.steer_cmd = 0
+        self._stop_command_pending = True
+        self._drive_inhibited = True
+        self._clear_pc_drive_inputs()
         self.send_serial_cmd("ESTOP")
 
     def _set_adas_state(self, enabled):
@@ -1319,7 +1819,7 @@ class GroundStationApp:
     def _release_stop_input(self):
         self._stop_input_active = False
 
-    def _set_drive_from_active_inputs(self):
+    def _set_drive_from_active_inputs(self, immediate=False):
         directions = set(self._active_drive_inputs.values())
         speed = int(self.slider_speed_step.get())
         steer_step = int(self.slider_steer_step.get())
@@ -1357,6 +1857,14 @@ class GroundStationApp:
                 self._drive_axis_active[axis] = True
                 continue
 
+            if immediate:
+                self._drive_axis_active[axis] = False
+                self._drive_axis_started_at[axis] = None
+                self._drive_axis_deadline[axis] = None
+                self._drive_axis_hold_value[axis] = 0
+                setattr(self, attr, 0)
+                continue
+
             if self._drive_axis_active[axis]:
                 self._drive_axis_active[axis] = False
                 started_at = self._drive_axis_started_at[axis]
@@ -1376,20 +1884,25 @@ class GroundStationApp:
                 self._drive_axis_hold_value[axis] = 0
                 setattr(self, attr, 0)
 
-    def _send_drive_command(self):
-        self._set_drive_from_active_inputs()
+    def _send_drive_command(self, immediate=False):
+        if not self._pc_drive_allowed():
+            return
+        self._set_drive_from_active_inputs(immediate=immediate)
         self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
 
     def _start_drive_input(self, token, direction):
-        if self.gamepad_enabled or self._stop_input_active or token in self._active_drive_inputs:
+        if (not self._pc_drive_allowed() or self.gamepad_enabled or
+                self._stop_input_active or token in self._active_drive_inputs):
             return
 
         self._active_drive_inputs[token] = direction
-        self._send_drive_command()
+        self._send_drive_command(immediate=token.startswith("key:"))
         self._schedule_drive_repeat()
 
     def _repeat_drive_command(self):
         self._drive_repeat_after_id = None
+        if not self._pc_drive_allowed():
+            return
         if not self._active_drive_inputs and not any(self._drive_axis_deadline.values()):
             return
         self._send_drive_command()
@@ -1400,40 +1913,8 @@ class GroundStationApp:
             self.root.after_cancel(self._drive_repeat_after_id)
             self._drive_repeat_after_id = None
 
-        deadlines = [deadline for deadline in self._drive_axis_deadline.values() if deadline is not None]
-        if not self._active_drive_inputs and not deadlines:
+        if not self._pc_drive_allowed():
             return
-
-        delay_ms = DRIVE_REPEAT_MS
-        if not self._active_drive_inputs:
-            remaining_ms = max(1, int((min(deadlines) - time.monotonic()) * 1000.0 + 0.999))
-            delay_ms = min(delay_ms, remaining_ms)
-        self._drive_repeat_after_id = self.root.after(delay_ms, self._repeat_drive_command)
-
-
-    def _send_drive_command(self):
-        self._set_drive_from_active_inputs()
-        self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
-
-    def _start_drive_input(self, token, direction):
-        if self.gamepad_enabled or self._stop_input_active or token in self._active_drive_inputs:
-            return
-
-        self._active_drive_inputs[token] = direction
-        self._send_drive_command()
-        self._schedule_drive_repeat()
-
-    def _repeat_drive_command(self):
-        self._drive_repeat_after_id = None
-        if not self._active_drive_inputs and not any(self._drive_axis_deadline.values()):
-            return
-        self._send_drive_command()
-        self._schedule_drive_repeat()
-
-    def _schedule_drive_repeat(self):
-        if self._drive_repeat_after_id is not None:
-            self.root.after_cancel(self._drive_repeat_after_id)
-            self._drive_repeat_after_id = None
 
         deadlines = [deadline for deadline in self._drive_axis_deadline.values() if deadline is not None]
         if not self._active_drive_inputs and not deadlines:
@@ -1449,14 +1930,26 @@ class GroundStationApp:
         if token not in self._active_drive_inputs:
             return
         del self._active_drive_inputs[token]
-        self._send_drive_command()
+        self._send_drive_command(immediate=token.startswith("key:"))
         self._schedule_drive_repeat()
 
     def _dispatch_drive(self):
+        if not self._pc_drive_allowed():
+            return
         now_ms = time.time() * 1000
         if (now_ms - self._last_drive_tx_ms) >= 30:
             self._last_drive_tx_ms = now_ms
             self.send_serial_cmd(f"DRIVE {self.drive_cmd} {self.steer_cmd}")
+
+    def _pc_drive_allowed(self):
+        return (
+            self.serial_running
+            and self.serial_client is not None
+            and self.serial_client.is_open
+            and self.dongle_mode == "ARMED"
+            and not self._drive_inhibited
+            and self.active_source != "JOYSTICK"
+        )
 
     def cmd_stop(self):
         self._cancel_drive_timers()
@@ -1586,18 +2079,27 @@ class GroundStationApp:
                     self.connect_serial(self.last_connected_port)
                     self.auto_reconnecting = False
 
-        # Cập nhật khung hình FPV chính (ESP32-S3 CAM)
-        if self.current_frame is not None:
+        # Chỉ resize khung FPV mới để tránh làm việc thừa trong vòng cập nhật UI.
+        with self._frame_lock:
+            if self._frame_dirty:
+                frame = self.current_frame
+                fps = self.fps_display
+                drop = self.drop_display
+                self._frame_dirty = False
+            else:
+                frame = None
+
+        if frame is not None:
             try:
                 h_can = self.video_canvas.winfo_height()
                 w_can = self.video_canvas.winfo_width()
                 if w_can > 50 and h_can > 50:
-                    orig_h, orig_w = self.current_frame.shape[:2]
+                    orig_h, orig_w = frame.shape[:2]
                     scale = min(w_can / orig_w, h_can / orig_h)
                     new_w = max(1, int(orig_w * scale))
                     new_h = max(1, int(orig_h * scale))
 
-                    resized = cv2.resize(self.current_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                     rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
                     self.photo_img = ImageTk.PhotoImage(image=Image.fromarray(rgb_frame))
 
@@ -1608,9 +2110,15 @@ class GroundStationApp:
                         anchor=tk.NW,
                         image=self.photo_img
                     )
-                    self.lbl_fps.config(text=f"FPS: {self.fps_display:.1f} | Kích thước: {orig_w}x{orig_h}")
+                    self.lbl_fps.config(
+                        text=f"FPS: {fps:.1f} | Drop: {drop} | Kích thước: {orig_w}x{orig_h}"
+                    )
+                    self._video_render_error_reported = False
             except Exception:
-                pass
+                if not self._video_render_error_reported:
+                    traceback.print_exc()
+                    self.log_console("[FPV Lỗi] Không thể hiển thị khung hình.", "ERROR")
+                    self._video_render_error_reported = True
 
         # Cập nhật khung hình mini Webcam lái tay (nếu đang bật)
         if self.hand_mode_enabled and self.hand_frame is not None:
@@ -1631,8 +2139,9 @@ class GroundStationApp:
 
     def on_closing(self):
         if messagebox.askokcancel("Thoát", "Bạn có chắc muốn đóng Ground Control Station?"):
-            if self.gamepad_connected:
+            if self.serial_running:
                 self.cmd_stop()
+            if self.gamepad_connected:
                 self.cmd_disarm()
             self.gamepad_enabled = False
             if self._gamepad_poll_after_id is not None:

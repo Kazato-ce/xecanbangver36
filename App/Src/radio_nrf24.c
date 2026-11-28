@@ -36,7 +36,7 @@ static float s_cmd_steer = 0.0f;
 static bool  s_cmd_arm = false;
 static bool  s_cmd_disarm = false;
 static bool  s_cmd_estop = false;
-static volatile bool s_adas_enabled = true;
+static volatile bool s_adas_enabled = false;
 
 static uint32_t s_packet_count = 0;
 static uint16_t s_last_seq = 0;
@@ -220,7 +220,7 @@ bool radio_init(SPI_HandleTypeDef *hspi)
     s_last_raw_drive = 0;
     s_last_raw_steer = 0;
     s_last_raw_status = 0;
-    s_adas_enabled = true;
+    s_adas_enabled = false;
 
     ce_low();
     csn_high();
