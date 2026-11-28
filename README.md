@@ -15,22 +15,16 @@ Dành cho người đọc, giảng viên và hội đồng chấm điểm muốn
 [![Canva Slide Presentation](https://img.shields.io/badge/Canva-XEM%20SLIDE%20THUYẾT%20TRÌNH-00C4CC?style=for-the-badge&logo=canva&logoColor=white)](https://www.canva.com/design/YOUR_CANVA_LINK_HERE)
 
 </div>
-
-| Nền tảng | Liên kết trực tiếp | Nội dung chi tiết |
-|:---:|---|---|
-| <img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Youtube_logo.png" width="28" alt="YouTube"/> **YouTube** | [▶️ **Bấm vào đây để xem Video Demo**](https://www.youtube.com/watch?v=YOUR_VIDEO_ID_HERE) | Video quay cận cảnh xe tự cân bằng tại chỗ, di chuyển tiến/lùi, bẻ lái 8 hướng, thử nghiệm né vật cản ADAS và chống rơi mép sàn ToF. |
-| <img src="https://upload.wikimedia.org/wikipedia/commons/0/08/Canva_icon_2021.svg" width="24" alt="Canva"/> **Canva** | [📑 **Bấm vào đây để mở Slide Canva**](https://www.canva.com/design/YOUR_CANVA_LINK_HERE) | Toàn bộ slide thuyết trình đồ án với hình ảnh thiết kế 3D, sơ đồ khối, lưu đồ thuật toán và kết quả thử nghiệm thực tế. |
-
 ---
 
 ## 👥 THÔNG TIN NHÓM THỰC HIỆN
 
-| STT | Họ và Tên | Vai trò chính trong dự án |
-|:---:|---|---|
-| **1** | **Nguyễn Đoàn Thanh Phong** *(Kazato-ce)* | Trưởng nhóm, Thiết kế kiến trúc Firmware STM32, Vòng cân bằng PID, Tích hợp cảm biến IMU & DDS Stepper |
-| **2** | **Đặng Thế Tứ** *(dangthetu)* | Thiết kế phần cứng mạch, Hệ thống FPV Camera Stream UDP, Ground Control Station (GCS) Python |
-| **3** | **Lê Văn Lộc** *(levanloc)* | Phát triển hệ thống nhận diện cử chỉ bàn tay AI MediaPipe & Điều khiển không dây |
-| **4** | **Phan Minh Quân** *(minhquan1120006)* | Phát triển cầu nối NRF24 Dongle, Cụm cảm biến siêu âm & Thử nghiệm thực tế | 
+| STT | Họ và Tên 
+|:---:|---|
+| **1** | **Nguyễn Đoàn Thanh Phong** *(Kazato-ce)* 
+| **2** | **Đặng Thế Tứ** *(dangthetu)* 
+| **3** | **Lê Văn Lộc** *(levanloc)* 
+| **4** | **Phan Minh Quân** *(minhquan1120006)* 
 ---
 
 ## 🌟 ĐẶC ĐIỂM NỔI BẬT CỦA HỆ THỐNG
